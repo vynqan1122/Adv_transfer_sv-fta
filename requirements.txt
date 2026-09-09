@@ -1,0 +1,8 @@
+# Install matching torch/torchvision wheels for your CPU or CUDA first.
+torch>=2.2,<3
+torchvision>=0.17,<1
+timm>=1.0,<2
+numpy>=1.24,<3
+Pillow>=10,<13
+tqdm>=4.66,<5
+matplotlib>=3.8,<4

@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
+ensure_selected
+
+TABLE_DIR="$OUT_DIR/table1_single_surrogate_transfer"
+
+# Baseline and proposed attacks.
+ATTACKS=(ifgsm mifgsm difgsm tifgsm si_ni_fgsm freq_only vit_aware ours)
+
+run_one_transfer() {
+  local setting="$1"
+  local surrogate="$2"
+  local targets="$3"
+
+  for attack in "${ATTACKS[@]}"; do
+    local attack_dir="$TABLE_DIR/$setting/$surrogate/$attack"
+
+    echo "============================================================"
+    echo "[Transfer Black-box / Single Surrogate]"
+    echo "setting   = $setting"
+    echo "surrogate = $surrogate"
+    echo "targets   = $targets"
+    echo "attack    = $attack"
+    echo "============================================================"
+
+    "$PY" scripts/run_attack.py \
+      --data-dir "$DATA_DIR" \
+      --selected-csv "$SELECTED_CSV" \
+      --models-dir "$MODEL_DIR" \
+      --surrogates "$surrogate" \
+      --attack "$attack" \
+      --variant full_model \
+      --fusion robust \
+      "${num_batch_args[@]}" \
+      "${memory_attack_args[@]}" \
+      "${svfca_amp_args[@]}" \
+      "${svfca_core_args[@]}" \
+      --batch-size "$BATCH_SIZE" \
+      --num-workers "$NUM_WORKERS" \
+      --device "$DEVICE" \
+      --seed "$SEED" \
+      --out-dir "$attack_dir" \
+      --adv-batch-dir "$(central_adv_batch_dir "$attack_dir")" \
+      "${clear_adv_args[@]}"
+
+    "$PY" scripts/evaluate.py \
+      --attack-dir "$attack_dir" \
+      --data-dir "$DATA_DIR" \
+      --models-dir "$MODEL_DIR" \
+      --targets "$targets" \
+      "${num_batch_args[@]}" \
+      "${eval_batch_args[@]}" \
+      "${delete_adv_args[@]}" \
+      --device "$DEVICE"
+  done
+}
+
+# Single CNN surrogate -> CNN targets
+run_one_transfer "resnet50_to_cnn" "resnet50" "$CNN_TARGETS"
+run_one_transfer "densenet121_to_cnn" "densenet121" "$CNN_TARGETS"
+
+# Single CNN surrogate -> ViT targets
+run_one_transfer "resnet50_to_vit" "resnet50" "$VIT_TARGETS"
+run_one_transfer "densenet121_to_vit" "densenet121" "$VIT_TARGETS"
+
+# Single ViT surrogate -> ViT targets
+run_one_transfer "vit_base_to_vit" "vit_base_patch16_224" "$VIT_TARGETS"
+run_one_transfer "deit_small_to_vit" "deit_small_patch16_224" "$VIT_TARGETS"
+
+# Single ViT surrogate -> CNN targets
+run_one_transfer "vit_base_to_cnn" "vit_base_patch16_224" "$CNN_TARGETS"
+run_one_transfer "deit_small_to_cnn" "deit_small_patch16_224" "$CNN_TARGETS"
+
+"$PY" scripts/aggregate_results.py \
+  --root "$TABLE_DIR" \
+  --out "$TABLE_DIR/table1_single_surrogate_summary.csv"
+
+echo "[DONE] Saved results to $TABLE_DIR"

@@ -1,0 +1,33 @@
+# Local environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.cache/
+.coverage
+htmlcov/
+.audit/
+
+# Dataset, checkpoints, generated experiments
+datasets/
+data/
+pretrained_models/
+models/
+runs/
+outputs/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+
+# Machine-specific settings and credentials
+.env
+.env.*
+!.env.example
+configs/*.env
+!configs/*.env.example
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

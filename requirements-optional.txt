@@ -1,0 +1,4 @@
+# Table VI: learned perceptual similarity (AlexNet).
+lpips>=0.1.4,<0.2
+# Table VIII: local robust ImageNet checkpoint loading.
+robustbench>=1.1,<2
