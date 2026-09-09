@@ -148,19 +148,19 @@ def test_shell_workflows():
         print('PASS deleted adversarial batches regenerate')
 
         before = len(calls())
-        run('run_table5_prime.sh')
+        run('run_table5_ablation.sh')
         assert not any(r['script']=='run_attack.py' for r in calls()[before:]), 'unchanged completed Table V did not reuse'
         before = len(calls())
-        run('run_table5_prime.sh', {'SVFCA_BAND_TEMPERATURE':'0.5'})
+        run('run_table5_ablation.sh', {'SVFCA_BAND_TEMPERATURE':'0.5'})
         assert any(r['script']=='run_attack.py' for r in calls()[before:]), 'changed configuration reused stale results'
         print('PASS Table V reuses only matching configuration')
 
         for changed in ({'EPS': '4/255'}, {'ALPHA': '0.4/255'}, {'STEPS': '20'},
                         {'AUTO_BATCH': '0'}, {'MIN_BATCH_SIZE': '2'}):
             # Reset to the same base before testing each independent key.
-            run('run_table5_prime.sh')
+            run('run_table5_ablation.sh')
             before = len(calls())
-            run('run_table5_prime.sh', changed)
+            run('run_table5_ablation.sh', changed)
             new_calls = calls()[before:]
             assert any(r['script'] == 'run_attack.py' for r in new_calls), changed
             if changed.get('AUTO_BATCH') == '0':

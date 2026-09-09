@@ -471,7 +471,7 @@ SKIP_TABLE8=1 bash sh/run_tables_1_8.sh
 bash sh/run_all_outputs.sh
 
 # Table V với 5.000 ảnh.
-bash sh/run_table5_sv_fca_5000.sh
+TABLE5P_NUM_IMAGES=5000 bash sh/run_table5_ablation.sh
 ```
 
 ### 7.3. CLI độc lập
@@ -501,18 +501,20 @@ python scripts/evaluate.py \
 | Launcher | Công việc | CSV chính dưới OUT_DIR |
 | --- | --- | --- |
 | `run_table1.sh` | Tables I–IV, tám attack, mỗi source riêng | `table1_single_source_transfer/table{1,2,3,4}_*.csv` |
-| `run_table5_prime.sh`, `run_table5_ablation.sh`, `run_table5_sv_fca.sh` | Sáu ablation trên bốn nhóm transfer | `table5_prime/table5_prime.csv` |
+| `run_table5_ablation.sh` | Sáu ablation trên bốn nhóm transfer | `table5_prime/table5_prime.csv` |
 | `run_table6_quality.sh` | Chất lượng ảnh, nhóm CNN và ViT source | `table6_quality/table6_quality.csv` |
 | `run_table7_runtime.sh` | Runtime, mặc định nhóm mixed source | `table7_runtime/table7_runtime.csv` |
 | `run_table8_defense.sh` | ASR trên robust targets | `table8_defense/table8_defense.csv` |
 | `run_tables_5_8.sh` | Tables V–VIII | Các file tương ứng ở trên |
-| `run_tables_1_8.sh`, `run_all_tables.sh` | Tables I–VIII | Các file tương ứng ở trên |
+| `run_tables_1_8.sh` | Tables I–VIII | Các file tương ứng ở trên |
 | `run_figures.sh` | Triplet, FFT, attention/saliency | `figures/*.png`, radial profile CSV |
 | `run_all_outputs.sh` | Tables và hình | Cả hai nhóm |
 | `select_5000.sh` | Chọn 5.000 ảnh clean-correct | CSV tập con |
 | `download_models.sh` | Tải/cache model timm | Cache MODEL_DIR |
 
-Wrapper `_1000`/`_5000` đặt số ảnh và đường dẫn Table V riêng. `run_table1_single_surrogate_transfer.sh` là launcher single-source cũ, ghi layout riêng trong `table1_single_surrogate_transfer` và một CSV tổng hợp dạng dài; để tạo đủ bốn bảng rộng I–IV, dùng `run_table1.sh`. Các launcher Table II/III kiểu cũ hoặc `no_weighting` không còn biểu diễn nhánh token/fusion/precision weighting của SV-FTA; xem thông báo deprecation của launcher, không dùng chúng để khẳng định một ablation mà SV-FCA không có.
+Thư mục `sh/` còn 12 file, gồm `common.sh` và 11 launcher trong bảng trên. Các wrapper trùng chức năng, launcher single-source cũ và ablation token/fusion/precision weighting lỗi thời đã được bỏ. Dùng `run_table1.sh` để tạo Tables I–IV và `run_table5_ablation.sh` cho Table V.
+
+Table V mặc định dùng `NUM_IMAGES` trong cấu hình chung. Đặt `TABLE5P_NUM_IMAGES=1000` hoặc `5000` khi cần số ảnh riêng; kết quả tương ứng được ghi vào `table5_prime_1000` hoặc `table5_prime_5000`. Các tên thư mục output và biến `TABLE5P_*` được giữ để tương thích với kết quả đã có.
 
 `ours`, `sv_fca`, `svfca`, `sv_fta`, `svfta`, `ddc` đều trỏ đến cùng class SV-FCA. Các cờ legacy như `--fusion`, `--rho`, `--lambda-grid`, `--eps-c`, `--c-min`, `--c-max`, `--disable-precision-weighting`, `--soft-sigma`, `--soft-power`, `--low-cutoff`, `--mid-cutoff`, `--low-prior`, `--mid-prior`, `--high-prior`, `--log-spectral-energy` được giữ để đọc lệnh cũ nhưng không điều khiển thuật toán SV-FCA hiện tại.
 

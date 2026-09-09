@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Summarize a Table V comparison between original full model and no-weighting.
 
-Expected directory layout produced by sh/run_table5_no_weighting_5000.sh:
+Expected layout for archived SV-FTA weighting experiments (legacy data only):
   <root>/<setting>/<run_name>/eval_results.csv
   <root>/<setting>/<run_name>/attack_config.json
+
+The current SV-FCA launchers do not generate this historical weighting study.
 
 Outputs:
   1) ASR table: Original Full Model vs Full Model (No Weighting)

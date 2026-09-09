@@ -32,7 +32,7 @@
 | Kiểm tra | Kết quả |
 | --- | --- |
 | Python compileall | PASS toàn bộ attacks, src, scripts và tests |
-| Bash syntax và workflow mô phỏng | PASS toàn bộ 23 file SH; kiểm tra đường dẫn có khoảng trắng/dấu phẩy, cache và cleanup |
+| Bash syntax và workflow mô phỏng | PASS toàn bộ 23 file SH tại lần rà soát ban đầu; kiểm tra đường dẫn có khoảng trắng/dấu phẩy, cache và cleanup |
 | Python script entry points | PASS gọi `--help` trên 18 file scripts |
 | Pytest CPU | **35 passed, 18 subtests passed** |
 | Pipeline tổng hợp | PASS chọn ảnh → SV-FCA → đọc hai batch (batch cuối thiếu) → evaluate micro-batch → quality, cả adv_fp32/delta_fp16 |
@@ -59,3 +59,11 @@ Các công thức được kiểm tra bằng MathJax. Kiểm tra cú pháp/đị
 Kiểm thử cập nhật: **51 tests và 29 subtests đạt trong 77,38 giây**, một luồng CPU, vô hiệu hóa GPU; dùng tensor/model giả và OOM mô phỏng. Không tải checkpoint, không chạy ImageNet hoặc phép đo hiệu năng thật. Thư viện kiểm thử được tái sử dụng từ cache cục bộ. Python/Bash syntax, CLI mới và `pip check` đều đạt. Warning Matplotlib Axes3D của môi trường tạm không ảnh hưởng các kiểm thử này.
 
 README hiện có 123 công thức. Bản sửa hiển thị trước đó đã được xác nhận trực tiếp trên GitHub (123/123 render, không lỗi macro); cập nhật cấu hình giữ nguyên các công thức và kiểm tra lại cú pháp MathJax.
+
+## Tinh gọn launcher Bash
+
+Giảm từ 23 xuống 12 file `.sh`. Giữ các launcher có chức năng riêng; đưa toàn bộ triển khai Table V vào `run_table5_ablation.sh`, thay các wrapper chọn 1.000/5.000 ảnh bằng tham số `TABLE5P_NUM_IMAGES`. Bỏ alias chạy toàn bộ bảng, launcher single-source layout cũ và các tên ablation không còn tương ứng với thuật toán hiện tại. Đường dẫn output và cấu hình thí nghiệm được giữ nguyên.
+
+README và kiểm thử Bash được cập nhật theo launcher còn lại. Các `PATCH_NOTES_*.md` là lịch sử nên có thể nhắc đến tên script đã xóa; không dùng các lệnh lịch sử đó cho phiên bản hiện tại.
+
+Kiểm tra sau tinh gọn: `python3 -u tests/test_shell.py` đạt cho cả 12 script, gồm kiểm tra cấu hình, cú pháp, chạy ngoài thư mục gốc, truyền ngân sách/OOM policy, cache, defense và cleanup. Chỉ dùng Python chuẩn cùng CLI giả lập, không tải model/dataset hoặc sử dụng GPU. Không còn tham chiếu đến launcher đã xóa trong code, kiểm thử hoặc tài liệu hướng dẫn hiện hành; 123 công thức README vẫn qua MathJax.

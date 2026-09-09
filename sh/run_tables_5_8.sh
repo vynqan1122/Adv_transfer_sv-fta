@@ -13,7 +13,7 @@ echo "=========================================="
 echo "[RUN] Table V: SV-FCA Ablation Study"
 echo "=========================================="
 if [[ "${SKIP_TABLE5:-0}" != "1" ]]; then
-  bash sh/run_table5_prime.sh
+  bash sh/run_table5_ablation.sh
 else
   echo "[SKIP] Table V"
 fi
