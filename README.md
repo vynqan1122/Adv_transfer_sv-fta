@@ -49,7 +49,7 @@ python -m pip install -r requirements-optional.txt
 
 LPIPS dùng AlexNet và có thể tải trọng số ở lần chạy đầu. RobustBench cần checkpoint tương thích với phiên bản thư viện. Ghi lại môi trường của thí nghiệm bằng `python -m pip freeze > runs/environment.txt` sau khi tạo thư mục `runs`.
 
-Thiết lập mặc định batch size 4 nhằm giảm bộ nhớ; việc chứa nhiều model đồng thời, đặc biệt ViT-L hoặc Swin-B, vẫn có thể vượt VRAM. CPU chạy được nhưng không phù hợp để đo hiệu năng GPU hoặc chạy toàn bộ ImageNet.
+Các launcher Bash mặc định batch size 4 nhằm giảm bộ nhớ. Khi gọi Python trực tiếp và không truyền `--batch-size`, script tạo attack và đo runtime mặc định 8, còn script chọn tập con mặc định 32. Vì vậy các lệnh mẫu bên dưới đều truyền batch size tường minh. Việc chứa nhiều model đồng thời, đặc biệt ViT-L hoặc Swin-B, vẫn có thể vượt VRAM. CPU chạy được nhưng không phù hợp để đo hiệu năng GPU hoặc chạy toàn bộ ImageNet.
 
 ## 3. Dữ liệu và model
 
@@ -76,7 +76,7 @@ Với ảnh validation đặt phẳng, cần chuẩn bị CSV từ ground truth 
 
 ### 3.2. Tiền xử lý
 
-Các ảnh đều được `Resize(256)`, `CenterCrop(224)`, chuyển thành RGB tensor `[0, 1]`. Perturbation được tối ưu trong không gian crop **224 × 224** này, không phải ảnh JPEG gốc. CLI `run_attack.py` yêu cầu `--image-size 224` để khớp tiền xử lý dùng khi tạo ảnh, đánh giá và vẽ hình.
+Các ảnh đều được `Resize(256)`, `CenterCrop(224)`, chuyển thành RGB tensor `[0, 1]`. Perturbation được tối ưu trong không gian crop **224 × 224** này, không phải ảnh JPEG gốc. Trong CLI `run_attack.py`, `--image-size` mặc định là 224; có thể bỏ cờ này, nhưng nếu truyền thì chỉ chấp nhận 224 để khớp tiền xử lý khi tạo ảnh, đánh giá và vẽ hình.
 
 Wrapper timm lấy `mean`, `std` và kích thước đầu vào từ cấu hình checkpoint. Khi cần, tensor được resize khả vi trước khi chuẩn hóa, ví dụ crop 224 được resize cho Inception-v3 dùng đầu vào 299. Đây là quy trình chung của thí nghiệm transfer, không đồng nhất với mọi quy trình đánh giá nguyên bản của từng model. RobustBench sử dụng preprocessing của model do RobustBench trả về, tránh chuẩn hóa hai lần.
 
@@ -116,27 +116,34 @@ Gọi ảnh sạch là $x$, nhãn đúng là $y$, ảnh ở bước $t$ là $x_t
 
 Các công thức bên dưới mô tả một ảnh; chiều batch được lược bỏ. Gradient và các tensor band có kích thước $C\times H\times W$; các phép chuẩn hóa và norm đều tính trên cả channel lẫn hai chiều không gian của từng ảnh. Mỗi $f_k$ bao gồm wrapper resize/normalization của model, nên đạo hàm đi qua cả tiền xử lý đó.
 
-$$
-x_0=x,\qquad x_t\in[0,1]^{C\times H\times W},\qquad
+```math
+x_0=x
+```
+
+```math
+x_t\in[0,1]^{C\times H\times W}
+```
+
+```math
 \lVert x_t-x\rVert_\infty\leq\varepsilon.
-$$
+```
 
 Mỗi thuật toán tạo hướng $d_t$ rồi cập nhật:
 
-$$
-x_{t+1}=\operatorname{clip}_{[0,1]}\!\left(
-x+\operatorname{clip}_{[-\varepsilon,\varepsilon]}
-\left(x_t+\alpha\operatorname{sign}(d_t)-x\right)
+```math
+x_{t+1}=\mathrm{clip}_{[0,1]}\left(
+x+\mathrm{clip}_{[-\varepsilon,\varepsilon]}
+\left(x_t+\alpha\mathrm{sign}(d_t)-x\right)
 \right).
-$$
+```
 
 Mặc định $\varepsilon=16/255$, $\alpha=1.6/255$, $T=10$, không random start. `--eps` và `--alpha` nhận số thực theo thang `[0, 1]`, không nhận chuỗi phân số.
 
 Hàm `normalize_grad_l1` thực tế chia cho **trung bình trị tuyệt đối** trên mỗi ảnh. Với $D=CHW$ và $\eta=10^{-12}$:
 
-$$
-\mathcal N(g)=\frac{g}{\max\!\left(D^{-1}\sum_{j=1}^{D}|g_j|,\eta\right)}.
-$$
+```math
+\mathcal N(g)=\frac{g}{\max\left(D^{-1}\sum_{j=1}^{D}|g_j|,\eta\right)}.
+```
 
 Điểm này cần giữ nguyên khi tái lập: chuẩn hóa theo tổng trị tuyệt đối khác hệ số $D$ và có thể làm thay đổi vị trí lookahead trong SI-NI-FGSM. Gradient được lấy từ loss trung bình batch; cùng batch size thì hệ số này chung cho các model.
 
@@ -146,18 +153,29 @@ $$
 
 Lấy trung bình gradient loss của các surrogate rồi dùng dấu của gradient:
 
-$$
-g_t=\frac{1}{K}\sum_{k=1}^{K}\nabla_{x_t}\ell(f_k(x_t),y),
-\qquad d_t=g_t.
-$$
+```math
+g_t=\frac{1}{K}\sum_{k=1}^{K}\nabla_{x_t}\ell(f_k(x_t),y)
+```
+
+```math
+d_t=g_t.
+```
 
 Khi có nhiều model, đây là trung bình **gradient của từng loss**, không phải cross-entropy của logits đã lấy trung bình.
 
 ### MI-FGSM — `attacks/mifgsm.py`
 
-$$
-m_0=0,\qquad m_{t+1}=\mu m_t+\mathcal N(g_t),\qquad d_t=m_{t+1}.
-$$
+```math
+m_0=0
+```
+
+```math
+m_{t+1}=\mu m_t+\mathcal N(g_t)
+```
+
+```math
+d_t=m_{t+1}.
+```
 
 Hệ số momentum mặc định $\mu=1$.
 
@@ -165,20 +183,23 @@ Hệ số momentum mặc định $\mu=1$.
 
 Thay đầu vào mỗi surrogate bằng biến đổi khả vi $\mathcal T$: resize ngẫu nhiên từ 224 đến 256, zero-padding đến 256, rồi resize về 224. Với xác suất $1-p$, dùng identity.
 
-$$
+```math
 d_t=\frac{1}{K}\sum_{k=1}^{K}
 \nabla_{x_t}\ell(f_k(\mathcal T_{k,t}(x_t)),y).
-$$
+```
 
 Biến đổi được lấy mẫu theo model và theo bước, dùng chung trong batch. CLI và pipeline mặc định truyền $p=1$; class dùng trực tiếp mặc định $p=0.7$. Phiên bản DI này không cộng momentum.
 
 ### TI-FGSM — `attacks/tifgsm.py`
 
-$$
-d_t=W* g_t,\qquad
+```math
+d_t=W* g_t
+```
+
+```math
 W_{u,v}=\frac{\exp(-(u^2+v^2)/(2\sigma^2))}
 {\sum_{a,b}\exp(-(a^2+b^2)/(2\sigma^2))}.
-$$
+```
 
 Code dùng convolution riêng từng channel, Gaussian kernel 15 × 15, $\sigma=3$, zero-padding. Phiên bản TI này không ghép DI hoặc momentum.
 
@@ -186,12 +207,18 @@ Code dùng convolution riêng từng channel, Gaussian kernel 15 × 15, $\sigma=
 
 Khởi tạo $m_0=0$. Lookahead theo momentum, lấy trung bình loss trên $S=5$ mức cường độ ảnh, rồi cộng momentum:
 
-$$
-z_t=x_t+\mu\alpha m_t,\qquad
+```math
+z_t=x_t+\mu\alpha m_t
+```
+
+```math
 g_t=\frac{1}{KS}\sum_{k=1}^{K}\sum_{i=0}^{S-1}
-\nabla_{z_t}\ell(f_k(z_t/2^i),y),
-\qquad m_{t+1}=\mu m_t+\mathcal N(g_t).
-$$
+\nabla_{z_t}\ell(f_k(z_t/2^i),y)
+```
+
+```math
+m_{t+1}=\mu m_t+\mathcal N(g_t).
+```
 
 Dùng $d_t=m_{t+1}$. Scale ở đây là **cường độ pixel**, không phải kích thước hình học. Đạo hàm đi qua phép chia nên có hệ số chain rule tương ứng. Lookahead không bị clip; ảnh sau cập nhật vẫn được chiếu về miền hợp lệ.
 
@@ -199,10 +226,10 @@ Các baseline là biến thể được định nghĩa bởi những công thứ
 
 ### Freq-Only — `attacks/freq_only.py`, `src/frequency.py`
 
-$$
-d_t=\operatorname{Re}\!\left(\mathcal F^{-1}
+```math
+d_t=\mathrm{Re}\left(\mathcal F^{-1}
 \left(M\odot\mathcal F(g_t)\right)\right).
-$$
+```
 
 FFT được thực hiện riêng trên mỗi channel. Với bán kính tần số chuẩn hóa $r=\sqrt{f_x^2+f_y^2}/\sqrt{0.5^2+0.5^2}$, chế độ `low_mid` dùng trọng số 1 khi $r\leq0.25$, 0.75 khi $0.25<r\leq0.55$, và $0.10+0.25(a+1)/2$ ở vùng cao; $a$ là cosine agreement trung bình giữa gradient của surrogate, giới hạn trong `[-1, 1]`.
 
@@ -214,11 +241,14 @@ Các mode khác: `low` giữ $r\leq0.25$; `mid` giữ $0.20<r\leq0.55$; `high` g
 
 Lấy trung bình gradient của các ViT surrogate; nếu không có ViT thì dùng tất cả surrogate. Tính saliency bằng trung bình trị tuyệt đối qua channel, average-pool thành lưới patch, giữ top 25% patch (làm tròn xuống, ít nhất một patch), rồi phóng mask bằng nearest-neighbor:
 
-$$
-s=\operatorname{Pool}_{\mathrm{patch}}
-\left(\operatorname{Mean}_{c}|g^{\mathrm{selected}}_t|\right),
-\qquad d_t=\operatorname{Upsample}(\operatorname{TopKMask}(s))\odot g_t.
-$$
+```math
+s=\mathrm{Pool}_{\mathrm{patch}}
+\left(\mathrm{Mean}_{c}|g^{\mathrm{selected}}_t|\right)
+```
+
+```math
+d_t=\mathrm{Upsample}(\mathrm{TopKMask}(s))\odot g_t.
+```
 
 Patch mặc định 16 pixel. Với crop 224, lưới có 14 × 14 patch và giữ đúng 49 patch; các patch đồng hạng tại ngưỡng được chọn theo `torch.topk`. Hướng cuối dùng mask nhân với gradient thô $g_t$ trung bình trên **tất cả** surrogate, như I-FGSM. Mask dựa trên input gradient, không đọc attention/token gradient nội bộ.
 
@@ -228,10 +258,13 @@ Patch mặc định 16 pixel. Với crop 224, lưới có 14 × 14 patch và gi�
 
 Mỗi surrogate có $R$ view; view đầu là identity, các view sau dùng phép DI ở trên. Với $P=KR$:
 
-$$
-g_{k,r,t}=\nabla_{x_t}\ell(f_k(\mathcal T_{k,r,t}(x_t)),y),
-\qquad \widehat g_{k,r,t}=\mathcal N(g_{k,r,t}).
-$$
+```math
+g_{k,r,t}=\nabla_{x_t}\ell(f_k(\mathcal T_{k,r,t}(x_t)),y)
+```
+
+```math
+\widehat g_{k,r,t}=\mathcal N(g_{k,r,t}).
+```
 
 View ngẫu nhiên được lấy mẫu trong vòng lặp từng surrogate. Chuẩn hóa **từng** source-view gradient trước khi lấy trung bình, khác baseline lấy trung bình gradient thô.
 
@@ -241,11 +274,14 @@ Chia bán kính chuẩn hóa thành $B$ khoảng đều nhau. Các mask $M_b$ ph
 
 Với $r=\sqrt{f_x^2+f_y^2}/\sqrt{0.5^2+0.5^2}$, band $b$ giữ $b/B\leq r<(b+1)/B$; band cuối giữ cả $r=1$. Trục dọc lấy từ `fftfreq(H)`, trục ngang lấy từ `rfftfreq(W)`. Mask có kích thước $H\times(\lfloor W/2\rfloor+1)$ và dùng chung cho các channel/ảnh. Đánh số các phần tử pool bằng $i=1,\ldots,P$:
 
-$$
-h_{i,b,t}=\operatorname{irFFT2}\!\left(
-M_b\odot\operatorname{rFFT2}(\widehat g_{i,t})\right),
-\qquad \overline h_{b,t}=\frac1P\sum_{i=1}^{P}h_{i,b,t}.
-$$
+```math
+h_{i,b,t}=\mathrm{irFFT2}\left(
+M_b\odot\mathrm{rFFT2}(\widehat g_{i,t})\right)
+```
+
+```math
+\overline h_{b,t}=\frac1P\sum_{i=1}^{P}h_{i,b,t}.
+```
 
 Cả hai phép biến đổi dùng `norm="ortho"`, inverse nhận lại đúng `(H, W)`, nên áp dụng được cho kích thước chẵn hoặc lẻ. Tổng các band khôi phục gradient đã chuẩn hóa trong sai số số học.
 
@@ -253,14 +289,21 @@ Cả hai phép biến đổi dùng `norm="ortho"`, inverse nhận lại đúng `
 
 Với mỗi ảnh, mỗi band:
 
-$$
-u_{i,b,t}=\frac{h_{i,b,t}}{\max(\lVert h_{i,b,t}\rVert_2,\eta)},
-\qquad U_{b,t}=\sum_i u_{i,b,t},\qquad Q_{b,t}=\sum_i\lVert u_{i,b,t}\rVert_2^2.
-$$
+```math
+u_{i,b,t}=\frac{h_{i,b,t}}{\max(\lVert h_{i,b,t}\rVert_2,\eta)}
+```
 
-$$
+```math
+U_{b,t}=\sum_i u_{i,b,t}
+```
+
+```math
+Q_{b,t}=\sum_i\lVert u_{i,b,t}\rVert_2^2.
+```
+
+```math
 c_{b,t}=\frac{\lVert U_{b,t}\rVert_2^2-Q_{b,t}}{P(P-1)}\quad(P>1).
-$$
+```
 
 Đây là trung bình tích vô hướng của mọi cặp vector đã chuẩn hóa, tương đương cosine khi gradient khác 0 và lớn hơn ngưỡng số học. Band có gradient bằng 0 đóng góp 0 vào các cặp. Khi $P=1$, code quy ước consensus bằng 1; consensus được giới hạn trong `[-1, 1]` để xử lý sai số làm tròn. Công thức trừ $Q$, không luôn trừ $P$, để xử lý đúng band bằng 0.
 
@@ -270,15 +313,18 @@ Code chỉ tích lũy tổng band, tổng vector chuẩn hóa và tổng bình p
 
 Với $b=0,\ldots,B-1$, tâm band là $q_b=(b+0.5)/B$:
 
-$$
-v_b=0.15+\exp\!\left(-\frac12\left(\frac{q_b-0.30}{0.30}\right)^2\right),
-\qquad p_b=\left[\max\!\left(\frac{v_b}{\max_j v_j},0.05\right)\right]^\gamma.
-$$
+```math
+v_b=0.15+\exp\left(-\frac12\left(\frac{q_b-0.30}{0.30}\right)^2\right)
+```
 
-$$
+```math
+p_b=\left[\max\left(\frac{v_b}{\max_j v_j},0.05\right)\right]^\gamma.
+```
+
+```math
 w_{b,t}=\frac{\exp(c_{b,t}/\tau+\log\max(p_b,\eta))}
 {\sum_j\exp(c_{j,t}/\tau+\log\max(p_j,\eta))}.
-$$
+```
 
 $\tau$ là temperature, $\gamma$ là độ mạnh prior. Prior thiên về tần số thấp–trung bình; phép chặn dưới bằng $\eta$ trước khi lấy log tránh `log(0)` nếu lũy thừa bị underflow. Với $\gamma=0$, prior đồng đều. Code dùng `torch.softmax` để tính trọng số ổn định; trọng số được tính riêng cho từng ảnh.
 
@@ -286,17 +332,27 @@ $\tau$ là temperature, $\gamma$ là độ mạnh prior. Prior thiên về tần
 
 Ở bước đầu $\widetilde w_{b,0}=w_{b,0}$. Các bước tiếp theo:
 
-$$
-\widetilde w_{b,t}=\beta\widetilde w_{b,t-1}+(1-\beta)w_{b,t},
-\qquad \sum_b\widetilde w_{b,t}=1.
-$$
+```math
+\widetilde w_{b,t}=\beta\widetilde w_{b,t-1}+(1-\beta)w_{b,t}
+```
+
+```math
+\sum_b\widetilde w_{b,t}=1.
+```
 
 Code chuẩn hóa lại tổng trọng số để hạn chế sai số. Sau đó:
 
-$$
-v_t=\sum_b\widetilde w_{b,t}\overline h_{b,t},\qquad
-m_{t+1}=\mu m_t+\mathcal N(v_t),\qquad d_t=m_{t+1}.
-$$
+```math
+v_t=\sum_b\widetilde w_{b,t}\overline h_{b,t}
+```
+
+```math
+m_{t+1}=\mu m_t+\mathcal N(v_t)
+```
+
+```math
+d_t=m_{t+1}.
+```
 
 Cập nhật ảnh bằng phép projection ở mục 4. Spectral memory và momentum được khởi tạo lại cho mỗi batch, không truyền từ ảnh này sang ảnh khác.
 
@@ -312,10 +368,11 @@ Cập nhật ảnh bằng phép projection ở mục 4. Spectral memory và mome
 | EMA decay | `--spectral-decay` | `SVFCA_SPECTRAL_DECAY` | 0.75 |
 | Momentum decay | `--decay` | `SVFCA_DECAY` | 1.0 |
 | CUDA autocast | `--amp` | `SVFCA_AMP` | 0, tắt |
+| Kiểu dữ liệu AMP | `--amp-dtype` | `SVFCA_AMP_DTYPE` | `fp16`; có thể chọn `bf16` |
 
 SV-FCA cần $TKR$ lần lấy gradient. Mỗi source-view cần một rFFT và $B$ inverse rFFT. Bộ nhớ tích lũy band tăng theo $B$ và batch size; streaming giảm việc giữ toàn bộ pool nhưng các surrogate vẫn được load đồng thời. Khi bật AMP, forward của SV-FCA dùng fp16/bf16 trên CUDA; FFT và thống kê giữ float32. Không tự động áp AMP cho bảy baseline.
 
-Tham số hợp lệ gồm $R\geq1$, $B\geq2$, $\tau>0$, $\gamma\geq0$, $0\leq\beta<1$ và $\mu\geq0$; các tham số thực phải hữu hạn. Các giá trị temperature/EMA ngoài miền hợp lệ bị báo lỗi, không được tự sửa ngầm. AMP không bảo đảm tương đương số học với float32; gradient không hữu hạn sẽ làm SV-FCA báo lỗi để người chạy đổi precision hoặc kiểm tra model.
+Số view $R$ và số band $B$ là số nguyên, với $R\geq1$ và $B\geq2$ khi dùng phân rã tần số. Các tham số thực phải hữu hạn và thỏa $0\leq p\leq1$, $\tau>0$, $\gamma\geq0$, $0\leq\beta<1$, $\mu\geq0$; $p$ là xác suất DI. Các giá trị temperature/EMA ngoài miền hợp lệ bị báo lỗi, không được tự sửa ngầm. AMP không bảo đảm tương đương số học với float32; gradient không hữu hạn sẽ làm SV-FCA báo lỗi để người chạy đổi precision hoặc kiểm tra model.
 
 ### 6.7. Ablation Table V
 
@@ -434,13 +491,15 @@ Wrapper `_1000`/`_5000` đặt số ảnh và đường dẫn Table V riêng. `r
 
 Gọi $N$ là số ảnh đã đánh giá, $C_i$ chỉ việc target đoán đúng ảnh sạch, $A_i$ chỉ việc target đoán sai ảnh adversarial:
 
-$$
+```math
 \mathrm{ASR}_{\mathrm{clean\ correct}}
-=100\frac{\sum_{i=1}^{N} C_i A_i}{\sum_{i=1}^{N} C_i},
-\qquad
+=100\frac{\sum_{i=1}^{N} C_i A_i}{\sum_{i=1}^{N} C_i}
+```
+
+```math
 \mathrm{ASR}_{\mathrm{all}}
 =100\frac{\sum_{i=1}^{N} A_i}{N}.
-$$
+```
 
 `asr` là alias của `asr_clean_correct`, không phải `asr_all`. Tập ảnh sạch đúng trên surrogate chưa chắc đúng trên target; mẫu số cần tính riêng cho từng target. Nếu không có ảnh sạch đúng, ASR có điều kiện không xác định và phải biểu diễn thiếu dữ liệu, không diễn giải thành 0%.
 
@@ -450,31 +509,40 @@ $$
 
 Với ảnh chuẩn hóa `[0, 1]`:
 
-$$
-\mathrm{MSE}=\frac1D\sum_j(x_j-x^{\mathrm{adv}}_j)^2,
-\qquad
+```math
+\mathrm{MSE}=\frac1D\sum_j(x_j-x^{\mathrm{adv}}_j)^2
+```
+
+```math
 \mathrm{PSNR}=10\log_{10}\frac{1}{\mathrm{MSE}}.
-$$
+```
 
 Hai ảnh bằng nhau có MSE bằng 0 và PSNR bằng **dương vô cùng** (`inf` trong CSV).
 
-$$
+Trong công thức SSIM, $z=x^{\mathrm{adv}}$ là ảnh đối kháng; $\mu_x$, $\mu_z$ là trung bình cục bộ, $\sigma_x^2$, $\sigma_z^2$ là phương sai cục bộ và $\sigma_{xz}$ là hiệp phương sai cục bộ.
+
+```math
 \mathrm{SSIM}=\frac{(2\mu_x\mu_z+C_1)(2\sigma_{xz}+C_2)}
-{(\mu_x^2+\mu_z^2+C_1)(\sigma_x^2+\sigma_z^2+C_2)},
-\qquad C_1=0.01^2,\quad C_2=0.03^2.
-$$
+{(\mu_x^2+\mu_z^2+C_1)(\sigma_x^2+\sigma_z^2+C_2)}
+```
+
+```math
+C_1=0.01^2,\quad C_2=0.03^2.
+```
 
 SSIM ở đây dùng cửa sổ **trung bình đều 11 × 11**, zero-padding, lấy trung bình theo channel và pixel; không đồng nhất với Gaussian-window SSIM của mọi thư viện khác. LPIPS dùng `lpips.LPIPS(net="alex")`, chuyển ảnh sang `[-1, 1]`. Nếu không có thư viện LPIPS, cột được để trống và chương trình thông báo. Các metric được tính theo ảnh rồi lấy trung bình; PSNR/SSIM càng cao và LPIPS càng thấp thì perturbation càng ít khác biệt theo metric đó.
 
 ### 8.3. Thời gian
 
-$$
-\mathrm{ms/image}=1000\frac{\text{tổng thời gian attack đã đo}}{\text{số ảnh thực sự đã đo}},
-\qquad
-\mathrm{relative\ cost}=\frac{\mathrm{ms/image}_{\mathrm{method}}}{\mathrm{ms/image}_{\mathrm{DI\text{-}FGSM}}}.
-$$
+```math
+\mathrm{ms/image}=1000\frac{\text{tổng thời gian attack đã đo}}{\text{số ảnh thực sự đã đo}}
+```
 
-Warmup chạy riêng và không tính vào số đo. CUDA được synchronize trước/sau đoạn đo. Thời gian bao gồm việc thực thi attack và logging bên trong attack; không tính tải checkpoint, đọc dataset, lưu batch hay đánh giá target. Baseline relative cost là DI-FGSM; nếu danh sách không có DI-FGSM thì dùng method đầu tiên. So sánh phải dùng cùng phần cứng, source set, batch size, số bước và chế độ precision. `RUNTIME_IMAGES` mặc định 128; `NUM_BATCHES` nếu đặt sẽ giới hạn số batch đo, không bao gồm warmup. Khi giới hạn số ảnh, batch cuối được cắt trước khi đo.
+```math
+\mathrm{relative\ cost}=\frac{\mathrm{ms/image}_{\mathrm{method}}}{\mathrm{ms/image}_{\mathrm{DI\text{-}FGSM}}}.
+```
+
+Warmup chạy riêng và không tính vào số đo. CUDA được synchronize trước/sau đoạn đo. Thời gian bao gồm việc thực thi attack và logging bên trong attack; không tính tải checkpoint, đọc dataset, lưu batch hay đánh giá target. Baseline relative cost là DI-FGSM; nếu danh sách không có DI-FGSM thì dùng method đầu tiên. So sánh phải dùng cùng phần cứng, source set, batch size, số bước và chế độ precision. `RUNTIME_IMAGES` mặc định 128. Khi đặt `NUM_BATCHES`, giới hạn này **thay thế** `RUNTIME_IMAGES`: đo theo số batch, không bao gồm warmup. Khi không đặt `NUM_BATCHES`, code mới giới hạn theo số ảnh và cắt batch cuối trước khi đo.
 
 ### 8.4. Batch lưu trên đĩa và hình minh họa
 
@@ -483,7 +551,7 @@ Mỗi attack ghi `attack_config.json`, `attack_batches.csv`, `attack_steps.csv` 
 - `adv_fp32`: lưu ảnh adversarial float32.
 - `delta_fp16`: lưu perturbation float16 và tái dựng từ ảnh sạch; giảm gần một nửa dung lượng tensor nhưng có sai số lượng tử hóa. Batch mới lưu epsilon để tái chiếu khi đọc, tránh sai số làm tròn vượt ngân sách. Khi cần so sánh chính xác, dùng `adv_fp32`.
 - Xóa batch sau sử dụng làm mất khả năng đánh giá/vẽ lại từ tensor cũ; đặt `DELETE_ADV_AFTER_USE=0` để giữ. Thông số và CSV kết quả vẫn được lưu.
-- Phổ hình minh họa dùng log biên độ FFT và chuẩn hóa riêng mỗi panel, không phải phép so sánh năng lượng phổ tuyệt đối.
+- Phổ hình minh họa lấy trung bình ba channel thành ảnh xám, tính `log1p(abs(fftshift(fft2(image))))`, rồi chuẩn hóa riêng mỗi panel. Giá trị này không biểu diễn năng lượng phổ tuyệt đối.
 - Attention rollout chỉ có ở model hỗ trợ; trường hợp còn lại dùng gradient saliency và ghi rõ tên phương pháp trên hình.
 
 ## 9. Kiểm tra và cấu trúc mã nguồn
@@ -512,7 +580,9 @@ Các `PATCH_NOTES_*.md` là lịch sử của những bản trước; một số
 
 ## 10. Công thức trên GitHub
 
-README dùng cú pháp toán GitHub: `$...$` cho công thức trong dòng và `$$...$$` trên dòng riêng cho công thức khối. Công thức không đặt trong code fence hoặc bảng Markdown; dùng các lệnh LaTeX phổ biến, không dùng macro tự định nghĩa, `\label`, `\ref` hay môi trường `equation`. Mở tab **Preview** hoặc trang README trên GitHub để xem công thức; trình xem Markdown không hỗ trợ math có thể hiển thị nguyên văn LaTeX.
+Công thức trong dòng dùng `$...$`; công thức riêng dùng khối có nhãn `math`, được GitHub hỗ trợ. Các tên hàm viết bằng `\mathrm{...}`. Công thức dài được tách thành các biểu thức ngắn để đọc được trong cột README.
+
+Khi sửa tài liệu, cần kiểm tra cả trang README đã render trên GitHub: kiểm tra LaTeX bằng MathJax cục bộ chưa đủ để phát hiện macro bị GitHub từ chối hoặc ký tự bị Markdown biến đổi. Trình xem Markdown khác cần hỗ trợ toán học để hiển thị các công thức này.
 
 ## 11. Tham khảo baseline
 
