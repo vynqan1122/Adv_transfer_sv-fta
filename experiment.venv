@@ -1,0 +1,95 @@
+# SV-FCA experiment settings (Bash syntax, loaded by sh/common.sh).
+# Edit values below; no manual `source` or `export` is required.
+# One-run environment overrides win: EPS=4/255 STEPS=20 bash sh/run_table1.sh
+# Relative paths resolve from the repository root. This FILE is unrelated to
+# the .venv/ DIRECTORY used for a Python virtual environment.
+
+# 01. Interpreter, data and output paths
+: "${PY:=python3}"
+: "${DATA_DIR:=../datasets/imagenet/val}"
+: "${VAL_DIR:=}"
+: "${LABELS_CSV=../datasets/imagenet/imagenet_val_labels.csv}"
+# Set LABELS_CSV="" for ImageFolder data with class subdirectories.
+: "${MODEL_DIR:=./pretrained_models}"
+: "${OUT_DIR:=./runs}"
+: "${ADV_BATCH_ROOT:=$OUT_DIR/adv_batches}"
+: "${ROBUSTBENCH_MODEL_DIR:=./models}"  # Parent of imagenet/Linf/*.pt
+
+# 02. Device, initial batch sizes and CUDA OOM recovery
+: "${DEVICE:=auto}"                    # auto | cuda | cuda:0 | cpu
+: "${BATCH_SIZE:=16}"                  # Initial attack/selection/runtime batch
+: "${EVAL_BATCH_SIZE:=$BATCH_SIZE}"
+: "${QUALITY_BATCH_SIZE:=$BATCH_SIZE}"
+: "${AUTO_BATCH:=1}"                   # 1: halve on CUDA OOM, 0: fail immediately
+: "${MIN_BATCH_SIZE:=1}"               # 16 -> 8 -> 4 -> 2 -> 1 by default
+: "${NUM_WORKERS:=2}"
+: "${EMPTY_CACHE_EVERY:=8}"
+: "${SEED:=0}"
+
+# 03. Dataset budget (OOM recovery keeps the same selected images)
+: "${NUM_BATCHES:=}"                   # Optional cap in ORIGINAL BATCH_SIZE units
+: "${NUM_IMAGES:=}"                    # Empty: NUM_BATCHES*BATCH_SIZE, else 1000
+: "${SELECTED_CSV:=}"                  # Empty: OUT_DIR/selected_NUM_IMAGES.csv
+: "${RUNTIME_IMAGES:=128}"             # Table VII image cap; NUM_BATCHES overrides it
+
+# 04. Shared attack budget, Tables I-VII and figures (pixels in [0, 1])
+# Decimal and a/b notation are accepted, including ALPHA=1.6/255.
+# Original protocol: 16/255, 1.6/255, 10 steps. For 4/255 use ALPHA=0.4/255.
+: "${EPS:=16/255}"
+: "${ALPHA:=1.6/255}"
+: "${STEPS:=10}"
+
+# 05. SV-FCA algorithm parameters
+: "${SVFCA_NUM_VIEWS:=4}"
+: "${SVFCA_SPECTRAL_BANDS:=6}"
+: "${SVFCA_DIVERSITY_PROB:=1.0}"
+: "${SVFCA_BAND_TEMPERATURE:=0.35}"
+: "${SVFCA_LOW_MID_STRENGTH:=1.0}"
+: "${SVFCA_SPECTRAL_DECAY:=0.75}"
+: "${SVFCA_DECAY:=1.0}"
+: "${SVFCA_AMP:=${SVFTA_AMP:-0}}"        # FP32 default; AMP is opt-in
+: "${SVFCA_AMP_DTYPE:=${SVFTA_AMP_DTYPE:-fp16}}"
+
+# 06. Surrogate and target model groups (comma-separated)
+: "${CNN_SURROGATES:=resnet50,densenet121}"
+: "${VIT_SURROGATES:=vit_base_patch16_224,deit_small_patch16_224}"
+: "${MIXED_SURROGATES:=resnet50,densenet121,vit_base_patch16_224,deit_small_patch16_224}"
+: "${CNN_TARGETS:=resnet152,inception_v3}"
+: "${VIT_TARGETS:=vit_large_patch16_224,deit_base_patch16_224,swin_tiny_patch4_window7_224}"
+: "${MIXED_TARGETS:=resnet152,inception_v3,vit_large_patch16_224,deit_base_patch16_224,swin_tiny_patch4_window7_224}"
+
+# 07. Table VIII: defense models and optional independent attack budget
+# Inherit the shared protocol unless explicitly changed. For comparison with
+# RobustBench's usual ImageNet Linf setting, choose 4/255 and 0.4/255 here.
+: "${DEFENSE_EPS:=$EPS}"
+: "${DEFENSE_ALPHA:=$ALPHA}"
+: "${DEFENSE_STEPS:=$STEPS}"
+: "${DEFENSE_TARGETS:=${DEFAULT_DEFENSE_TARGETS:-robustbench:Salman2020Do_R50:imagenet:Linf,robustbench:Mo2022When_ViT-B:imagenet:Linf,robustbench:Liu2023Comprehensive_Swin-B:imagenet:Linf}}"
+: "${DEFENSE_COLUMNS:=}"               # Empty: derive labels from target specs
+: "${DEFENSE_METHODS:=difgsm,ifgsm,mifgsm,si_ni_fgsm,tifgsm,vit_aware,freq_only,ours}"
+
+# 08. Storage, reuse and table selection
+: "${ADV_STORAGE_MODE:=delta_fp16}"     # delta_fp16 | adv_fp32
+: "${CLEAR_ADV_BATCH_DIR:=1}"
+: "${DELETE_ADV_AFTER_USE:=1}"
+: "${FORCE_ATTACKS:=0}"
+: "${SKIP_TABLES:=0}"
+: "${SKIP_TABLES1_4:=0}"
+: "${SKIP_TABLE5:=0}"
+: "${SKIP_TABLE6:=0}"
+: "${SKIP_TABLE7:=0}"
+: "${SKIP_TABLE8:=0}"
+: "${TABLE5P_SETTINGS:=cnn_to_vit,vit_to_cnn,vit_to_vit,mixed_mixed}"
+: "${TABLE5P_VARIANTS:=full_model,without_sv_pool,without_frequency_coordination,without_band_consensus,without_low_mid_prior,without_spectral_memory}"
+
+# 09. Figures
+: "${RUN_FIGURES:=0}"                  # run_tables_1_8.sh; run_all_outputs includes figures
+: "${SKIP_FIGURES:=0}"
+: "${FIG_ROOT:=$OUT_DIR/figures}"
+: "${FIG_INDEX:=0}"
+: "${FIG_SURROGATES:=resnet50}"
+: "${FIG_METHODS:=ifgsm,mifgsm,difgsm,tifgsm,si_ni_fgsm,vit_aware,freq_only,ours}"
+: "${FIG_TRIPLET_METHOD:=ours}"
+: "${FIG_ATTENTION_MODEL:=$FIG_SURROGATES}"
+: "${FIG_ADV_STORAGE_MODE:=adv_fp32}"
+: "${FORCE_FIGURES:=0}"

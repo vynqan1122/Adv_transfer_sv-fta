@@ -15,11 +15,10 @@ sys.path.insert(0, ROOT_DIR)
 
 import torch
 import torch.nn.functional as F
-from PIL import Image
 from tqdm import tqdm
 
 from scripts.batch_io import delete_consumed_batches, load_clean_batch, reconstruct_adv, resolve_batch_files, safe_torch_load, validate_payload
-from src.datasets import imagenet_transform
+from src.batching import AdaptiveBatchExecutor, model_loading_oom_hint
 from src.utils import get_device, save_json
 
 
@@ -73,48 +72,64 @@ def compute_for_attack(
     device,
     max_batches=None,
     use_lpips=True,
-    quality_batch_size=4,
+    quality_batch_size=16,
+    auto_batch=True,
+    min_batch_size=1,
+    execution_stats=None,
 ):
+    """Return PSNR, SSIM, LPIPS, files; optionally fill execution_stats in place.
+
+    The adaptive cap persists across every saved batch in this attack. Only
+    complete chunks contribute to averages, including when LPIPS triggers OOM.
+    """
     if max_batches is not None and max_batches <= 0:
         raise ValueError("max_batches must be positive")
-    if quality_batch_size <= 0:
-        raise ValueError("quality_batch_size must be positive")
+    executor = AdaptiveBatchExecutor(
+        quality_batch_size, device, auto_batch=auto_batch,
+        min_batch_size=min_batch_size, context=f"quality: {Path(attack_dir).name}",
+    )
     batch_files = resolve_batch_files(attack_dir)
     if max_batches is not None:
         batch_files = batch_files[: int(max_batches)]
 
-    lpips_model = load_lpips(device) if use_lpips else None
+    with model_loading_oom_hint(device, context="loading LPIPS model"):
+        lpips_model = load_lpips(device) if use_lpips else None
     psnr_sum = 0.0
     ssim_sum = 0.0
     lpips_sum = 0.0
     count = 0
     lpips_count = 0
 
-    qbs = max(1, int(quality_batch_size))
     with torch.inference_mode():
         for file_path in tqdm(batch_files, desc=Path(attack_dir).name, leave=False):
             payload = safe_torch_load(file_path)
             stored_cpu, _, relpaths, storage_key = validate_payload(payload, file_path)
 
-            for start in range(0, len(relpaths), qbs):
-                end = min(start + qbs, len(relpaths))
+            def process_chunk(start, end):
                 clean = load_clean_batch(data_dir, relpaths[start:end], device)
                 stored = stored_cpu[start:end].float().to(device, non_blocking=True)
                 adv = reconstruct_adv(clean, stored, storage_key, payload.get("eps"))
 
                 p = psnr_batch(clean, adv)
                 s = ssim_batch(clean, adv)
-                psnr_sum += float(p.sum().item())
-                ssim_sum += float(s.sum().item())
-                count += int(end - start)
-
+                chunk_lpips_sum = 0.0
+                chunk_lpips_count = 0
                 if lpips_model is not None:
                     val = lpips_model(clean * 2 - 1, adv * 2 - 1).view(-1)
-                    lpips_sum += float(val.sum().item())
-                    lpips_count += int(val.numel())
-                    del val
+                    chunk_lpips_sum = float(val.sum().item())
+                    chunk_lpips_count = int(val.numel())
 
-                del adv, stored, clean, p, s
+                return (
+                    float(p.sum().item()), float(s.sum().item()), end - start,
+                    chunk_lpips_sum, chunk_lpips_count,
+                )
+
+            for _, _, sums in executor.iter_batches(len(relpaths), process_chunk):
+                psnr_sum += sums[0]
+                ssim_sum += sums[1]
+                count += sums[2]
+                lpips_sum += sums[3]
+                lpips_count += sums[4]
 
             del payload, stored_cpu
             if device.type == "cuda":
@@ -128,6 +143,9 @@ def compute_for_attack(
     psnr = psnr_sum / max(count, 1)
     ssim = ssim_sum / max(count, 1)
     lp = lpips_sum / max(lpips_count, 1) if lpips_count else ""
+    if execution_stats is not None:
+        execution_stats.update(executor.metadata)
+        execution_stats.update({"total_images": count, "lpips_images": lpips_count})
     return psnr, ssim, lp, batch_files
 
 
@@ -138,7 +156,9 @@ def main():
     ap.add_argument("--out", default="runs/table6_quality/table6_quality.csv")
     ap.add_argument("--device", default="auto")
     ap.add_argument("--max-batches", type=int, default=None)
-    ap.add_argument("--quality-batch-size", type=int, default=4)
+    ap.add_argument("--quality-batch-size", type=int, default=16, help="Initial quality microbatch size (default: 16); halves after CUDA OOM.")
+    ap.add_argument("--no-auto-batch", action="store_true", help="Disable automatic CUDA OOM batch reduction.")
+    ap.add_argument("--min-batch-size", type=int, default=1, help="Smallest batch cap allowed during CUDA OOM retries (default: 1).")
     ap.add_argument("--no-lpips", action="store_true")
     ap.add_argument("--delete-batches-after-use", action="store_true")
     args = ap.parse_args()
@@ -146,12 +166,16 @@ def main():
         ap.error("--max-batches must be positive")
     if args.quality_batch_size <= 0:
         ap.error("--quality-batch-size must be positive")
+    if not 1 <= args.min_batch_size <= args.quality_batch_size:
+        ap.error("--min-batch-size must be between 1 and --quality-batch-size")
 
     device = get_device(args.device)
     rows = []
+    execution_rows = []
     cleanup_plan = []
     with open(args.manifest, "r", newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
+            execution_stats = {}
             psnr, ssim, lp, batch_files = compute_for_attack(
                 args.data_dir,
                 row["attack_dir"],
@@ -159,6 +183,9 @@ def main():
                 max_batches=args.max_batches,
                 use_lpips=not args.no_lpips,
                 quality_batch_size=args.quality_batch_size,
+                auto_batch=not args.no_auto_batch,
+                min_batch_size=args.min_batch_size,
+                execution_stats=execution_stats,
             )
             rows.append({
                 "Family": row.get("family", ""),
@@ -169,6 +196,7 @@ def main():
                 "AttackDir": row["attack_dir"],
             })
             cleanup_plan.append((row["attack_dir"], batch_files))
+            execution_rows.append({"attack_dir": row["attack_dir"], **execution_stats})
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "w", newline="", encoding="utf-8") as f:
@@ -177,6 +205,26 @@ def main():
         )
         writer.writeheader()
         writer.writerows(rows)
+
+    save_json(
+        {
+            "auto_batch": not args.no_auto_batch,
+            "min_batch_size": args.min_batch_size,
+            "attacks": execution_rows,
+        },
+        str(Path(args.out).with_suffix(".execution.json")),
+    )
+    # Table VI may merge and remove a one-attack CSV; retain execution details
+    # beside each attack so that its actual batch size remains auditable.
+    for execution in execution_rows:
+        save_json(
+            {
+                "auto_batch": not args.no_auto_batch,
+                "min_batch_size": args.min_batch_size,
+                **execution,
+            },
+            os.path.join(execution["attack_dir"], "quality_execution.json"),
+        )
 
     # Delete only after metric CSV is safely on disk.
     if args.delete_batches_after_use:

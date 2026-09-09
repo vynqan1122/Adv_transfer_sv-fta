@@ -15,35 +15,9 @@ run_one_transfer() {
     local attack_dir="$TABLE_DIR/$setting/$source_model/$attack"
     echo "[Table 1 / Single-source transfer] setting=$setting source=$source_model targets=$targets attack=$attack"
 
-    "$PY" scripts/run_attack.py \
-      --data-dir "$DATA_DIR" \
-      --selected-csv "$SELECTED_CSV" \
-      --models-dir "$MODEL_DIR" \
-      --surrogates "$source_model" \
-      --attack "$attack" \
-      --variant full_model \
-      --fusion robust \
-      "${num_batch_args[@]}" \
-      "${memory_attack_args[@]}" \
-      "${svfca_amp_args[@]}" \
-      "${svfca_core_args[@]}" \
-      --batch-size "$BATCH_SIZE" \
-      --num-workers "$NUM_WORKERS" \
-      --device "$DEVICE" \
-      --seed "$SEED" \
-      --out-dir "$attack_dir" \
-      --adv-batch-dir "$(central_adv_batch_dir "$attack_dir")" \
-      "${clear_adv_args[@]}"
+    run_attack_once "$attack" "$source_model" "$attack_dir"
 
-    "$PY" scripts/evaluate.py \
-      --attack-dir "$attack_dir" \
-      --data-dir "$DATA_DIR" \
-      --models-dir "$MODEL_DIR" \
-      --targets "$targets" \
-      "${num_batch_args[@]}" \
-      "${eval_batch_args[@]}" \
-      "${delete_adv_args[@]}" \
-      --device "$DEVICE"
+    run_eval "$attack_dir" "$targets"
   done
 }
 

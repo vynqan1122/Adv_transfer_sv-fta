@@ -1,53 +1,27 @@
 #!/usr/bin/env bash
-# Shared configuration for all table and figure scripts.
-# Every variable can be overridden from the shell, e.g.:
-#   DATA_DIR=/data/imagenet/val DEVICE=cuda bash sh/run_tables_1_8.sh
-
+# Shared experiment launcher. Edit experiment.venv; keep workflow logic here.
+# Preview resolved settings without loading models: bash sh/common.sh
 set -euo pipefail
 
 COMMON_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$COMMON_SCRIPT_DIR/.." && pwd)"
 cd "$PROJECT_ROOT"
 
-: "${PY:=python3}"
-: "${DATA_DIR:=../datasets/imagenet/val}"
-: "${VAL_DIR:=}"
-: "${LABELS_CSV=../datasets/imagenet/imagenet_val_labels.csv}"
-: "${MODEL_DIR:=./pretrained_models}"
-: "${OUT_DIR:=./runs}"
+# 01. Load configuration. Optional overlays also use Bash default assignments
+# (: "${NAME:=value}") so one-run environment overrides always take priority.
+CONFIG_FILE="${CONFIG_FILE:-$PROJECT_ROOT/experiment.venv}"
+[[ "$CONFIG_FILE" == /* ]] || CONFIG_FILE="$PROJECT_ROOT/$CONFIG_FILE"
+if [[ ! -f "$CONFIG_FILE" || "$CONFIG_FILE" != *.venv ]]; then
+  echo "[config] CONFIG_FILE must be an existing .venv file: $CONFIG_FILE" >&2
+  exit 1
+fi
+source "$CONFIG_FILE"
+if [[ "$CONFIG_FILE" != "$PROJECT_ROOT/experiment.venv" ]]; then
+  source "$PROJECT_ROOT/experiment.venv"
+fi
+export CONFIG_FILE ROBUSTBENCH_MODEL_DIR
 
-# All adversarial .pt batches are stored only under this central folder.
-# Each attack run gets a unique subfolder under ADV_BATCH_ROOT, mirroring its OUT_DIR path.
-: "${ADV_BATCH_ROOT:=$OUT_DIR/adv_batches}"
-: "${CLEAR_ADV_BATCH_DIR:=1}"
-
-: "${BATCH_SIZE:=4}"
-: "${NUM_BATCHES:=}"
-: "${EVAL_BATCH_SIZE:=$BATCH_SIZE}"
-: "${NUM_WORKERS:=2}"
-: "${DEVICE:=auto}"
-: "${SEED:=0}"
-
-# 12GB-VRAM-oriented defaults. Streaming SV-FCA is FP32 by default for
-# reproducibility; enable SVFCA_AMP=1 only if a setting still exceeds VRAM.
-: "${EMPTY_CACHE_EVERY:=8}"
-: "${DELETE_ADV_AFTER_USE:=1}"
-: "${SVFCA_AMP:=${SVFTA_AMP:-0}}"
-: "${SVFCA_AMP_DTYPE:=${SVFTA_AMP_DTYPE:-fp16}}"
-# Legacy aliases retained for older scripts.
-: "${SVFTA_AMP:=$SVFCA_AMP}"
-: "${SVFTA_AMP_DTYPE:=$SVFCA_AMP_DTYPE}"
-
-# Final SV-FCA defaults used across Tables I-VIII.
-: "${SVFCA_NUM_VIEWS:=4}"
-: "${SVFCA_SPECTRAL_BANDS:=6}"
-: "${SVFCA_DIVERSITY_PROB:=1.0}"
-: "${SVFCA_BAND_TEMPERATURE:=0.35}"
-: "${SVFCA_LOW_MID_STRENGTH:=1.0}"
-: "${SVFCA_SPECTRAL_DECAY:=0.75}"
-: "${SVFCA_DECAY:=1.0}"
-: "${ADV_STORAGE_MODE:=delta_fp16}"
-
+# 02. Validate and resolve dependent values before creating outputs.
 require_positive_integer() {
   local name="$1" value="$2"
   if [[ ! "$value" =~ ^[1-9][0-9]*$ ]]; then
@@ -55,15 +29,39 @@ require_positive_integer() {
     return 1
   fi
 }
-require_positive_integer BATCH_SIZE "$BATCH_SIZE"
-require_positive_integer EVAL_BATCH_SIZE "$EVAL_BATCH_SIZE"
+require_nonnegative_integer() {
+  local name="$1" value="$2"
+  if [[ ! "$value" =~ ^(0|[1-9][0-9]*)$ ]]; then
+    echo "[config] $name must be a nonnegative integer; got '$value'" >&2
+    return 1
+  fi
+}
+for config_key in BATCH_SIZE EVAL_BATCH_SIZE QUALITY_BATCH_SIZE MIN_BATCH_SIZE STEPS DEFENSE_STEPS RUNTIME_IMAGES SVFCA_NUM_VIEWS SVFCA_SPECTRAL_BANDS; do
+  require_positive_integer "$config_key" "${!config_key}"
+done
+if (( SVFCA_SPECTRAL_BANDS < 2 )); then
+  echo "[config] SVFCA_SPECTRAL_BANDS must be at least 2" >&2
+  exit 1
+fi
+for config_key in NUM_WORKERS EMPTY_CACHE_EVERY FIG_INDEX SEED; do
+  require_nonnegative_integer "$config_key" "${!config_key}"
+done
+for config_key in AUTO_BATCH CLEAR_ADV_BATCH_DIR DELETE_ADV_AFTER_USE SVFCA_AMP FORCE_ATTACKS FORCE_FIGURES SKIP_TABLES SKIP_TABLES1_4 SKIP_TABLE5 SKIP_TABLE6 SKIP_TABLE7 SKIP_TABLE8 RUN_FIGURES SKIP_FIGURES; do
+  if [[ "${!config_key}" != 0 && "${!config_key}" != 1 ]]; then
+    echo "[config] $config_key must be 0 or 1; got '${!config_key}'" >&2
+    exit 1
+  fi
+done
+for config_key in BATCH_SIZE EVAL_BATCH_SIZE QUALITY_BATCH_SIZE; do
+  if (( MIN_BATCH_SIZE > ${!config_key} )); then
+    echo "[config] MIN_BATCH_SIZE cannot exceed $config_key" >&2
+    exit 1
+  fi
+done
 if [[ -n "$NUM_BATCHES" ]]; then
   require_positive_integer NUM_BATCHES "$NUM_BATCHES"
 fi
-
-# If NUM_IMAGES is not explicitly set and NUM_BATCHES is given, select exactly enough images.
-# Otherwise default to 1000 images.
-if [[ -z "${NUM_IMAGES+x}" ]]; then
+if [[ -z "$NUM_IMAGES" ]]; then
   if [[ -n "$NUM_BATCHES" ]]; then
     NUM_IMAGES=$(( NUM_BATCHES * BATCH_SIZE ))
   else
@@ -73,31 +71,59 @@ fi
 require_positive_integer NUM_IMAGES "$NUM_IMAGES"
 : "${SELECTED_CSV:=$OUT_DIR/selected_${NUM_IMAGES}.csv}"
 
-# Model groups used throughout Table I-VIII.
-: "${CNN_SURROGATES:=resnet50,densenet121}"
-: "${VIT_SURROGATES:=vit_base_patch16_224,deit_small_patch16_224}"
-: "${MIXED_SURROGATES:=resnet50,densenet121,vit_base_patch16_224,deit_small_patch16_224}"
+# Parse decimal or numerator/denominator notation; never evaluate shell/Python
+# expressions. Downstream CLIs receive ordinary finite decimal numbers.
+resolved_budget=$("$PY" - "$EPS" "$ALPHA" "$DEFENSE_EPS" "$DEFENSE_ALPHA" \
+  "$SVFCA_DIVERSITY_PROB" "$SVFCA_BAND_TEMPERATURE" "$SVFCA_LOW_MID_STRENGTH" \
+  "$SVFCA_SPECTRAL_DECAY" "$SVFCA_DECAY" <<'PY_BUDGET'
+from fractions import Fraction
+import math
+import sys
+values = []
+for name, raw in zip(('EPS', 'ALPHA', 'DEFENSE_EPS', 'DEFENSE_ALPHA'), sys.argv[1:]):
+    try:
+        parts = raw.split('/')
+        if len(parts) not in (1, 2):
+            raise ValueError('use a decimal or numerator/denominator')
+        value = Fraction(parts[0]) / (Fraction(parts[1]) if len(parts) == 2 else 1)
+        if not 0 <= value <= 1:
+            raise ValueError('must be in [0, 1] for input pixels in [0, 1]')
+    except (ValueError, ZeroDivisionError) as exc:
+        raise SystemExit(f'[config] invalid {name}={raw!r}: {exc}') from None
+    values.append(format(float(value), '.17g'))
+rules = (
+    ('SVFCA_DIVERSITY_PROB', lambda v: 0 <= v <= 1, 'in [0, 1]'),
+    ('SVFCA_BAND_TEMPERATURE', lambda v: v > 0, 'positive'),
+    ('SVFCA_LOW_MID_STRENGTH', lambda v: v >= 0, 'nonnegative'),
+    ('SVFCA_SPECTRAL_DECAY', lambda v: 0 <= v < 1, 'in [0, 1)'),
+    ('SVFCA_DECAY', lambda v: v >= 0, 'nonnegative'),
+)
+for (name, valid, requirement), raw in zip(rules, sys.argv[5:]):
+    try:
+        value = float(raw)
+        if not math.isfinite(value) or not valid(value):
+            raise ValueError(f'must be finite and {requirement}')
+    except ValueError as exc:
+        raise SystemExit(f'[config] invalid {name}={raw!r}: {exc}') from None
+print(' '.join(values))
+PY_BUDGET
+)
+read -r EPS ALPHA DEFENSE_EPS DEFENSE_ALPHA <<< "$resolved_budget"
+unset resolved_budget config_key
+case "$ADV_STORAGE_MODE" in
+  adv_fp32|delta_fp16) ;;
+  *) echo "[config] ADV_STORAGE_MODE must be adv_fp32 or delta_fp16" >&2; exit 1 ;;
+esac
+case "$SVFCA_AMP_DTYPE" in
+  fp16|bf16) ;;
+  *) echo "[config] SVFCA_AMP_DTYPE must be fp16 or bf16" >&2; exit 1 ;;
+esac
 
-: "${CNN_TARGETS:=resnet152,inception_v3}"
-: "${VIT_TARGETS:=vit_large_patch16_224,deit_base_patch16_224,swin_tiny_patch4_window7_224}"
-: "${MIXED_TARGETS:=resnet152,inception_v3,vit_large_patch16_224,deit_base_patch16_224,swin_tiny_patch4_window7_224}"
-
-# Table VIII defaults. Override DEFENSE_TARGETS with RobustBench specs when available.
-: "${ROBUSTBENCH_MODEL_DIR:=$PROJECT_ROOT/models}"
-export ROBUSTBENCH_MODEL_DIR
-: "${DEFAULT_DEFENSE_TARGETS:=robustbench:Salman2020Do_R50:imagenet:Linf,robustbench:Mo2022When_ViT-B:imagenet:Linf,robustbench:Liu2023Comprehensive_Swin-B:imagenet:Linf}"
-: "${DEFENSE_TARGETS:=$DEFAULT_DEFENSE_TARGETS}"
-: "${DEFENSE_COLUMNS:=}"
-
-# Figure defaults.
-: "${FIG_ROOT:=$OUT_DIR/figures}"
-: "${FIG_INDEX:=0}"
-: "${FIG_SURROGATES:=resnet50}"
-: "${FIG_METHODS:=ifgsm,mifgsm,difgsm,tifgsm,si_ni_fgsm,vit_aware,freq_only,ours}"
-: "${FIG_TRIPLET_METHOD:=ours}"
-: "${FIG_ATTENTION_MODEL:=$FIG_SURROGATES}"
-: "${FORCE_FIGURES:=0}"
-: "${FORCE_ATTACKS:=0}"
+# 03. Shared CLI arguments. OOM recovery is implemented inside Python, keeping
+# logical batches/sample limits intact while reducing only GPU microbatches.
+attack_budget_args=(--eps "$EPS" --alpha "$ALPHA" --steps "$STEPS")
+adaptive_batch_args=(--min-batch-size "$MIN_BATCH_SIZE")
+[[ "$AUTO_BATCH" == 1 ]] || adaptive_batch_args+=(--no-auto-batch)
 
 maybe_val_args=()
 if [[ -n "$VAL_DIR" ]]; then
@@ -109,6 +135,7 @@ if [[ -n "$LABELS_CSV" ]]; then
   maybe_label_args+=(--labels-csv "$LABELS_CSV")
 fi
 
+# 04. Selection, output paths and reuse signatures.
 ensure_selected() {
   mkdir -p "$(dirname "$SELECTED_CSV")"
   local need_select=0
@@ -142,6 +169,7 @@ PY_COUNT_ROWS
       --surrogates "$MIXED_SURROGATES" \
       --num-images "$NUM_IMAGES" \
       --batch-size "$BATCH_SIZE" \
+      "${adaptive_batch_args[@]}" \
       --num-workers "$NUM_WORKERS" \
       --device "$DEVICE" \
       --seed "$SEED" \
@@ -203,7 +231,9 @@ PY_CHECK_MANIFEST
 attack_signature() {
   "$PY" - "$SELECTED_CSV" "$DATA_DIR" "$MODEL_DIR" "$NUM_IMAGES" \
     "$NUM_BATCHES" "$BATCH_SIZE" "$SEED" "$DEVICE" "$ADV_STORAGE_MODE" \
-    "${svfca_core_args[@]}" "${svfca_amp_args[@]}" "$@" <<'PY_SIGNATURE'
+    "${svfca_core_args[@]}" "${svfca_amp_args[@]}" \
+    "$EPS" "$ALPHA" "$STEPS" "$DEFENSE_EPS" "$DEFENSE_ALPHA" "$DEFENSE_STEPS" \
+    "$AUTO_BATCH" "$MIN_BATCH_SIZE" "$EVAL_BATCH_SIZE" "$QUALITY_BATCH_SIZE" "$@" <<'PY_SIGNATURE'
 import hashlib, json, pathlib, sys
 digest = hashlib.sha256(json.dumps(sys.argv[1:], ensure_ascii=False).encode())
 digest.update(pathlib.Path(sys.argv[1]).read_bytes())
@@ -269,6 +299,7 @@ run_attack_once() {
   local out_dir="$3"
   local variant="${4:-full_model}"
   local fusion="${5:-robust}"
+  local EPS="${6:-$EPS}" ALPHA="${7:-$ALPHA}" STEPS="${8:-$STEPS}"
   local signature
   signature="$(attack_signature "$method" "$sources" "$variant" "$fusion")"
 
@@ -295,6 +326,8 @@ run_attack_once() {
     "${clear_adv_args[@]}" \
     "${num_batch_args[@]}" \
     "${memory_attack_args[@]}" \
+    --eps "$EPS" --alpha "$ALPHA" --steps "$STEPS" \
+    "${adaptive_batch_args[@]}" \
     "${svfca_amp_args[@]}" \
     "${svfca_core_args[@]}" \
     --batch-size "$BATCH_SIZE" \
@@ -303,3 +336,36 @@ run_attack_once() {
     --seed "$SEED"
   printf '%s\n' "$signature" > "$out_dir/.shell_attack_signature"
 }
+
+# 05. Reusable evaluation command; target checks remain table-specific.
+run_eval() {
+  local out_dir="$1" targets="$2"
+  "$PY" scripts/evaluate.py \
+    --attack-dir "$out_dir" \
+    --data-dir "$DATA_DIR" \
+    --models-dir "$MODEL_DIR" \
+    --robustbench-model-dir "$ROBUSTBENCH_MODEL_DIR" \
+    --targets "$targets" \
+    "${num_batch_args[@]}" \
+    "${eval_batch_args[@]}" \
+    "${adaptive_batch_args[@]}" \
+    "${delete_adv_args[@]}" \
+    --device "$DEVICE"
+}
+
+# Executing common.sh is a lightweight configuration check, not an experiment.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  printf '%-23s %s\n' \
+    'Configuration:' "$CONFIG_FILE" \
+    'Python / device:' "$PY / $DEVICE" \
+    'Data:' "$DATA_DIR" \
+    'Models:' "$MODEL_DIR" \
+    'Outputs:' "$OUT_DIR" \
+    'Selected images:' "$NUM_IMAGES" \
+    'Original batch limit:' "${NUM_BATCHES:-all}" \
+    'Attack / eval / quality:' "$BATCH_SIZE / $EVAL_BATCH_SIZE / $QUALITY_BATCH_SIZE" \
+    'Auto batch / minimum:' "$AUTO_BATCH / $MIN_BATCH_SIZE" \
+    'EPS / ALPHA / STEPS:' "$EPS / $ALPHA / $STEPS" \
+    'Defense budget:' "$DEFENSE_EPS / $DEFENSE_ALPHA / $DEFENSE_STEPS" \
+    'Selected CSV:' "$SELECTED_CSV"
+fi

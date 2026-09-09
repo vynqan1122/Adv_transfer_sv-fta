@@ -63,15 +63,7 @@ for setting_raw in "${SETTINGS[@]}"; do
     echo "[Table V / SV-FCA] images=$NUM_IMAGES setting=$setting variant=$variant"
     run_attack_once sv_fca "$sources" "$dir" "$variant" robust
 
-    "$PY" scripts/evaluate.py \
-      --attack-dir "$dir" \
-      --data-dir "$DATA_DIR" \
-      --models-dir "$MODEL_DIR" \
-      --targets "$targets" \
-      "${num_batch_args[@]}" \
-      "${eval_batch_args[@]}" \
-      "${delete_adv_args[@]}" \
-      --device "$DEVICE"
+    run_eval "$dir" "$targets"
     printf '%s\n' "$targets" > "$dir/.shell_eval_targets"
   done
 done

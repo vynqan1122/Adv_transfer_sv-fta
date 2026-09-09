@@ -4,7 +4,7 @@ set -euo pipefail
 # Run from project root even if this script is launched from another folder.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-cd "$PROJECT_ROOT"
+source "$SCRIPT_DIR/common.sh"
 
 # You can skip any table by setting SKIP_TABLE5=1, SKIP_TABLE6=1, etc.
 # Example: SKIP_TABLE6=1 bash sh/run_tables_5_8.sh

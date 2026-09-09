@@ -17,6 +17,8 @@ mkdir -p "$ROOT"
   "${num_batch_args[@]}" \
   "${svfca_amp_args[@]}" \
   "${svfca_core_args[@]}" \
+  "${attack_budget_args[@]}" \
+  "${adaptive_batch_args[@]}" \
   --batch-size "$BATCH_SIZE" \
   --num-workers "$NUM_WORKERS" \
   --device "$DEVICE" \

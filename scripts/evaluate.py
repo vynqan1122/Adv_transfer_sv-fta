@@ -1,24 +1,19 @@
 #!/usr/bin/env python3
 import os
-import shutil
 import sys
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT_DIR)
 
 import argparse
-import csv
-import glob
-from pathlib import Path
 
 import torch
-from PIL import Image
 from tqdm import tqdm
 
 from scripts.batch_io import delete_consumed_batches, load_clean_batch, reconstruct_adv, resolve_batch_files, safe_torch_load, validate_payload
+from src.batching import AdaptiveBatchExecutor, model_loading_oom_hint
 from src.models import load_models
 from src.utils import (
-    ensure_dir,
     get_device,
     parse_model_list,
     save_json,
@@ -27,7 +22,10 @@ from src.utils import (
 )
 
 
-def evaluate_one_model(model, batch_files, data_dir, device, eval_batch_size=None):
+def evaluate_one_model(
+    model, batch_files, data_dir, device, eval_batch_size=16,
+    auto_batch=True, min_batch_size=1,
+):
     """
     Fair evaluation:
     - clean_acc: target accuracy on clean images
@@ -36,8 +34,11 @@ def evaluate_one_model(model, batch_files, data_dir, device, eval_batch_size=Non
     """
     if not batch_files:
         raise ValueError("At least one adversarial batch is required")
-    if eval_batch_size is not None and eval_batch_size <= 0:
-        raise ValueError("eval_batch_size must be positive")
+    # Keep explicit None compatible with existing callers while bounding memory.
+    executor = AdaptiveBatchExecutor(
+        16 if eval_batch_size is None else eval_batch_size, device,
+        auto_batch=auto_batch, min_batch_size=min_batch_size, context="evaluation",
+    )
     n_total = 0
     n_clean_correct = 0
     n_adv_wrong = 0
@@ -53,10 +54,7 @@ def evaluate_one_model(model, batch_files, data_dir, device, eval_batch_size=Non
 
             stored_cpu, labels, relpaths, storage_key = validate_payload(payload, file_path)
 
-            chunk_size = len(relpaths) if eval_batch_size is None or eval_batch_size <= 0 else int(eval_batch_size)
-
-            for start in range(0, len(relpaths), chunk_size):
-                end = min(start + chunk_size, len(relpaths))
+            def process_chunk(start, end):
                 labels_chunk = labels[start:end].long().to(device, non_blocking=True)
                 relpaths_chunk = relpaths[start:end]
                 clean = load_clean_batch(data_dir, relpaths_chunk, device)
@@ -77,14 +75,24 @@ def evaluate_one_model(model, batch_files, data_dir, device, eval_batch_size=Non
                 success_clean_correct = clean_correct & adv_wrong
                 robust_clean_correct = clean_correct & adv_correct
 
-                n_total += int(labels_chunk.numel())
-                n_clean_correct += int(clean_correct.sum().item())
-                n_adv_wrong += int(adv_wrong.sum().item())
-                n_adv_correct += int(adv_correct.sum().item())
-                n_success_clean_correct += int(success_clean_correct.sum().item())
-                n_robust_clean_correct += int(robust_clean_correct.sum().item())
+                # Commit counters only after both forwards and all reductions
+                # succeed. A retried OOM must never count a sample twice.
+                return (
+                    int(labels_chunk.numel()),
+                    int(clean_correct.sum().item()),
+                    int(adv_wrong.sum().item()),
+                    int(adv_correct.sum().item()),
+                    int(success_clean_correct.sum().item()),
+                    int(robust_clean_correct.sum().item()),
+                )
 
-                del adv_chunk, stored_chunk, labels_chunk, clean, clean_logits, adv_logits
+            for _, _, counts in executor.iter_batches(len(relpaths), process_chunk):
+                n_total += counts[0]
+                n_clean_correct += counts[1]
+                n_adv_wrong += counts[2]
+                n_adv_correct += counts[3]
+                n_success_clean_correct += counts[4]
+                n_robust_clean_correct += counts[5]
 
             del payload, labels, stored_cpu
             if device.type == "cuda":
@@ -113,6 +121,13 @@ def evaluate_one_model(model, batch_files, data_dir, device, eval_batch_size=Non
         # Keep old column name for aggregate_results.py.
         # From now on, "asr" means fair ASR.
         "asr": asr_clean_correct,
+        **{
+            key: executor.metadata[key] for key in (
+                "requested_batch_size", "effective_batch_size",
+                "min_successful_batch_size", "max_successful_batch_size",
+                "oom_retries", "successful_batches",
+            )
+        },
     }
 
 
@@ -160,7 +175,9 @@ def main():
     parser.add_argument("--device", default="auto")
     parser.add_argument("--out-csv", default=None)
     parser.add_argument("--num-batches", type=int, default=None, help="Evaluate only the first N adversarial batch files from the manifest.")
-    parser.add_argument("--eval-batch-size", type=int, default=None, help="Split each saved adversarial batch into smaller chunks during evaluation to reduce VRAM.")
+    parser.add_argument("--eval-batch-size", type=int, default=16, help="Initial evaluation microbatch size (default: 16); halves after CUDA OOM.")
+    parser.add_argument("--no-auto-batch", action="store_true", help="Disable automatic CUDA OOM batch reduction.")
+    parser.add_argument("--min-batch-size", type=int, default=1, help="Smallest batch cap allowed during CUDA OOM retries (default: 1).")
     parser.add_argument("--delete-batches-after-eval", action="store_true",
                         help="Delete adversarial .pt batches after all target models are evaluated and CSV/JSON results are safely written.")
     args = parser.parse_args()
@@ -168,6 +185,8 @@ def main():
         parser.error("--num-batches must be positive")
     if args.eval_batch_size is not None and args.eval_batch_size <= 0:
         parser.error("--eval-batch-size must be positive")
+    if not 1 <= args.min_batch_size <= args.eval_batch_size:
+        parser.error("--min-batch-size must be between 1 and --eval-batch-size")
     if not parse_model_list(args.targets):
         parser.error("--targets must contain at least one model")
 
@@ -184,13 +203,16 @@ def main():
     for name in target_names:
         print("[target]", name)
 
-        model = load_models([name], device=device, pretrained=True, robustbench_model_dir=(args.robustbench_model_dir or None))[name]
+        with model_loading_oom_hint(device, context=f"loading evaluation target {name}"):
+            model = load_models([name], device=device, pretrained=True, robustbench_model_dir=(args.robustbench_model_dir or None))[name]
         metrics = evaluate_one_model(
             model=model,
             batch_files=batch_files,
             data_dir=args.data_dir,
             device=device,
             eval_batch_size=args.eval_batch_size,
+            auto_batch=not args.no_auto_batch,
+            min_batch_size=args.min_batch_size,
         )
 
         row = {"target": name}
@@ -232,6 +254,20 @@ def main():
             "avg_asr_clean_correct": avg_row["asr_clean_correct"],
             "avg_asr": avg_row["asr"],
             "batch_files": batch_files,
+            "execution": {
+                "auto_batch": not args.no_auto_batch,
+                "min_batch_size": args.min_batch_size,
+                "targets": {
+                    row["target"]: {
+                        key: row[key] for key in (
+                            "requested_batch_size", "effective_batch_size",
+                            "min_successful_batch_size", "max_successful_batch_size",
+                            "oom_retries", "successful_batches",
+                        )
+                    }
+                    for row in rows if row["target"] != "AVG"
+                },
+            },
         },
         os.path.join(args.attack_dir, "eval_summary.json"),
     )

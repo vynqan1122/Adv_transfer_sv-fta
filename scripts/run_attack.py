@@ -16,9 +16,25 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from attacks import build_attack
+from src.batching import AdaptiveBatchExecutor, model_loading_oom_hint
 from src.datasets import ImageNetCSVDataset, collate_with_paths, imagenet_transform
 from src.models import load_models
 from src.utils import ensure_dir, get_device, parse_model_list, save_json, set_model_cache_dir, set_seed, tensor_stats, write_csv
+
+
+def attack_chunk(attack, models, images, labels, device, start, end):
+    """Keep each forward/backward scope separate so OOM retries can release it."""
+    inputs = images[start:end].to(device, non_blocking=True)
+    targets = labels[start:end].to(device, non_blocking=True)
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
+    result = attack(models, inputs, targets)
+    return {
+        "adv": result.adv.detach().to(device="cpu", dtype=torch.float32),
+        "logs": result.logs,
+        "peak_allocated_mb": torch.cuda.max_memory_allocated(device) / (1024.0 ** 2) if device.type == "cuda" else 0.0,
+        "peak_reserved_mb": torch.cuda.max_memory_reserved(device) / (1024.0 ** 2) if device.type == "cuda" else 0.0,
+    }
 
 
 def main():
@@ -84,7 +100,9 @@ def main():
     parser.add_argument("--eps", type=float, default=16.0/255.0)
     parser.add_argument("--alpha", type=float, default=1.6/255.0)
     parser.add_argument("--steps", type=int, default=10)
-    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--no-auto-batch", action="store_true", help="Disable automatic CUDA OOM batch-size reduction.")
+    parser.add_argument("--min-batch-size", type=int, default=1, help="Smallest CUDA OOM retry chunk; logical image budgets stay unchanged.")
     parser.add_argument("--num-batches", type=int, default=None,
                         help="Limit the number of dataloader batches to generate. Useful for all tables using the same experimental budget.")
     parser.add_argument("--empty-cache-every", type=int, default=1,
@@ -112,6 +130,8 @@ def main():
     args = parser.parse_args()
     if args.batch_size <= 0 or args.num_workers < 0:
         parser.error("--batch-size must be positive and --num-workers nonnegative")
+    if not 1 <= args.min_batch_size <= args.batch_size:
+        parser.error("--min-batch-size must be between 1 and --batch-size")
     if args.num_batches is not None and args.num_batches <= 0:
         parser.error("--num-batches must be positive")
     if args.image_size != 224:
@@ -209,7 +229,8 @@ def main():
         for old_file in Path(adv_batch_dir).glob("batch_*.pt"):
             old_file.unlink()
     save_json(config, os.path.join(args.out_dir, "attack_config.json"))
-    models = load_models(surrogate_names, device=device, pretrained=True)
+    with model_loading_oom_hint(device, "attack source models"):
+        models = load_models(surrogate_names, device=device, pretrained=True)
     # Gradients are needed only with respect to input pixels.
     for model in models.values():
         model.eval()
@@ -217,24 +238,32 @@ def main():
 
     batch_rows = []
     step_rows = []
+    executor = AdaptiveBatchExecutor(args.batch_size, device, not args.no_auto_batch, args.min_batch_size,
+                                     context="attack " + args.attack)
     for batch_idx, (images, labels, relpaths) in enumerate(tqdm(loader, desc="attack {}".format(args.attack))):
         if args.num_batches is not None and batch_idx >= args.num_batches:
             break
 
-        images = images.to(device, non_blocking=True)
-        labels = labels.to(device, non_blocking=True)
-        if device.type == "cuda":
-            torch.cuda.reset_peak_memory_stats(device)
-        result = attack(models, images, labels)
-        if device.type == "cuda":
-            peak_allocated_mb = torch.cuda.max_memory_allocated(device) / (1024.0 ** 2)
-            peak_reserved_mb = torch.cuda.max_memory_reserved(device) / (1024.0 ** 2)
-        else:
-            peak_allocated_mb = 0.0
-            peak_reserved_mb = 0.0
-
-        delta_gpu = result.adv - images
-        stats = tensor_stats(delta_gpu)
+        # The DataLoader and manifest keep their original logical batch size.
+        # GPU chunks may shrink, but NUM_BATCHES still processes the same images.
+        parts = []
+        chunk_sizes = []
+        peak_allocated_mb = peak_reserved_mb = 0.0
+        retries_before = executor.oom_retries
+        process = lambda start, end: attack_chunk(attack, models, images, labels, device, start, end)
+        for chunk_idx, (start, end, chunk) in enumerate(executor.iter_batches(len(images), process)):
+            parts.append(chunk["adv"])
+            chunk_sizes.append(end - start)
+            peak_allocated_mb = max(peak_allocated_mb, chunk["peak_allocated_mb"])
+            peak_reserved_mb = max(peak_reserved_mb, chunk["peak_reserved_mb"])
+            for step_log in chunk["logs"]:
+                row = {"batch": batch_idx, "microbatch": chunk_idx, "sample_start": start,
+                       "sample_end": end, "microbatch_size": end - start}
+                row.update(step_log)
+                step_rows.append(row)
+        adv_cpu = torch.cat(parts, dim=0)
+        delta_cpu = adv_cpu - images
+        stats = tensor_stats(delta_cpu)
         labels_cpu = labels.detach().cpu()
         out_file = os.path.join(adv_batch_dir, "batch_{:05d}.pt".format(batch_idx))
 
@@ -255,15 +284,19 @@ def main():
             "eps": args.eps,
         }
         if args.storage_mode == "delta_fp16":
-            payload["delta"] = delta_gpu.detach().to(device="cpu", dtype=torch.float16)
+            payload["delta"] = delta_cpu.to(dtype=torch.float16)
         else:
-            payload["adv"] = result.adv.detach().to(device="cpu", dtype=torch.float32)
+            payload["adv"] = adv_cpu
         torch.save(payload, out_file)
         saved_bytes = os.path.getsize(out_file)
         batch_rows.append({
             "batch": batch_idx,
             "file": os.path.relpath(out_file, args.out_dir).replace("\\", "/"),
             "n": int(images.size(0)),
+            "requested_batch_size": args.batch_size,
+            "effective_batch_size": executor.batch_size,
+            "microbatch_sizes": ",".join(map(str, chunk_sizes)),
+            "oom_retries": executor.oom_retries - retries_before,
             "source_model": ",".join(surrogate_names),
             "surrogates": args.surrogates,
             "source_setting": "single_source" if len(surrogate_names) == 1 else "multi_source",
@@ -277,13 +310,8 @@ def main():
             "storage_mode": args.storage_mode,
             "saved_file_mb": saved_bytes / (1024.0 ** 2),
         })
-        for step_log in result.logs:
-            row = {"batch": batch_idx}
-            row.update(step_log)
-            step_rows.append(row)
-
         # Release tensors aggressively. This helps long table runs on 12GB GPUs.
-        del result, payload, delta_gpu, labels_cpu, images, labels
+        del chunk, parts, adv_cpu, payload, delta_cpu, labels_cpu, images, labels, process
         if device.type == "cuda" and args.empty_cache_every > 0 and ((batch_idx + 1) % args.empty_cache_every == 0):
             torch.cuda.empty_cache()
 
@@ -293,6 +321,10 @@ def main():
     if step_rows:
         fieldnames = sorted(set().union(*[set(r.keys()) for r in step_rows]))
         write_csv(step_rows, os.path.join(args.out_dir, "attack_steps.csv"), fieldnames=fieldnames)
+    config["batch_execution"] = executor.metadata
+    config["generated_images"] = sum(row["n"] for row in batch_rows)
+    config["generated_logical_batches"] = len(batch_rows)
+    save_json(config, os.path.join(args.out_dir, "attack_config.json"))
     print("Saved attack outputs to", args.out_dir)
 
 

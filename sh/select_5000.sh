@@ -11,6 +11,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
   --surrogates "$MIXED_SURROGATES" \
   --num-images "$NUM_IMAGES" \
   --batch-size "$BATCH_SIZE" \
+  "${adaptive_batch_args[@]}" \
   --num-workers "$NUM_WORKERS" \
   --device "$DEVICE" \
   --seed "$SEED" \

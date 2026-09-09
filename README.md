@@ -49,7 +49,7 @@ python -m pip install -r requirements-optional.txt
 
 LPIPS dùng AlexNet và có thể tải trọng số ở lần chạy đầu. RobustBench cần checkpoint tương thích với phiên bản thư viện. Ghi lại môi trường của thí nghiệm bằng `python -m pip freeze > runs/environment.txt` sau khi tạo thư mục `runs`.
 
-Các launcher Bash mặc định batch size 4 nhằm giảm bộ nhớ. Khi gọi Python trực tiếp và không truyền `--batch-size`, script tạo attack và đo runtime mặc định 8, còn script chọn tập con mặc định 32. Vì vậy các lệnh mẫu bên dưới đều truyền batch size tường minh. Việc chứa nhiều model đồng thời, đặc biệt ViT-L hoặc Swin-B, vẫn có thể vượt VRAM. CPU chạy được nhưng không phù hợp để đo hiệu năng GPU hoặc chạy toàn bộ ImageNet.
+Mặc định batch size là **16** cho chọn ảnh, tạo attack, đánh giá và đo chất lượng/runtime. Khi CUDA hết bộ nhớ trong lúc xử lý ảnh, chương trình tự giảm batch thực thi và thử lại phần chưa hoàn thành; chi tiết ở mục 7.2. Nếu riêng trọng số model đã vượt VRAM, giảm batch không giải quyết được: cần giảm số surrogate hoặc dùng GPU nhiều bộ nhớ hơn. CPU dùng được cho kiểm thử nhỏ; không cần chạy toàn bộ thí nghiệm để kiểm tra cấu hình.
 
 ## 3. Dữ liệu và model
 
@@ -137,7 +137,7 @@ x+\mathrm{clip}_{[-\varepsilon,\varepsilon]}
 \right).
 ```
 
-Mặc định $\varepsilon=16/255$, $\alpha=1.6/255$, $T=10$, không random start. `--eps` và `--alpha` nhận số thực theo thang `[0, 1]`, không nhận chuỗi phân số.
+Mặc định $\varepsilon=16/255$, $\alpha=1.6/255$, $T=10$, không random start. Chỉnh `EPS`, `ALPHA`, `STEPS` trong `experiment.venv` để áp dụng cho các launcher. File cấu hình nhận cả số thập phân lẫn phân số như `16/255`, `1.6/255`; `common.sh` đổi sang số thực trước khi gọi Python. Khi gọi trực tiếp CLI, `--eps` và `--alpha` vẫn nhận số thập phân theo thang pixel `[0, 1]`.
 
 Hàm `normalize_grad_l1` thực tế chia cho **trung bình trị tuyệt đối** trên mỗi ảnh. Với $D=CHW$ và $\eta=10^{-12}$:
 
@@ -389,42 +389,75 @@ Với prior cố định, variant không consensus có trọng số không đổ
 
 ## 7. Chạy thí nghiệm
 
-### 7.1. Cấu hình dùng chung
+### 7.1. Một file cấu hình: `experiment.venv`
+
+Mở và sửa [experiment.venv](experiment.venv). Tất cả launcher tự đọc file này; không cần copy template hoặc `source` một file `.env` khác. Đây là **file cấu hình Bash** có đuôi `.venv`, khác với **thư mục môi trường Python** `.venv/` tạo ở bước cài đặt.
+
+Các tham số được nhóm theo dữ liệu, thiết bị/bộ nhớ, ngân sách tấn công, source/target, SV-FCA, defense và hình. Trong mỗi dòng dạng `: "${BATCH_SIZE:=16}"`, sửa giá trị sau `:=`. Biến đã truyền từ terminal được ưu tiên hơn giá trị mặc định trong file.
 
 ```bash
-cp configs/sv_fca_tables_1_8.env.example configs/local.env
-# Sửa DATA_DIR, LABELS_CSV, DEVICE và đường dẫn model trong configs/local.env.
-source configs/local.env
+# Xem cấu hình đã được giải quyết và kiểm tra tham số; không load model/dataset.
+bash sh/common.sh
+
+# Ghi đè tạm cho một lần chạy.
+EPS=4/255 ALPHA=0.4/255 STEPS=10 bash sh/run_table5_ablation.sh
+
+# Dùng thêm cấu hình riêng nếu cần; mặc định chỉ cần experiment.venv.
+CONFIG_FILE=/path/to/server.venv bash sh/run_tables_1_8.sh
 ```
 
-Script tự chuyển về gốc repository; đường dẫn tương đối trong biến cấu hình được hiểu theo gốc này. Có thể đặt `PY=python` để dùng interpreter của môi trường đã kích hoạt. Cấu hình cá nhân `configs/local.env` không được đưa lên Git.
+File do `CONFIG_FILE` chỉ định được đọc trước; các giá trị còn thiếu được lấy từ `experiment.venv`. Dùng cùng cú pháp mặc định `: "${NAME:=value}"` trong file riêng để giữ ưu tiên của biến terminal. Tên `*.local.venv` được Git bỏ qua nếu muốn lưu cấu hình máy cá nhân.
 
-| Biến | Ý nghĩa / mặc định |
-| --- | --- |
-| `DATA_DIR` | Gốc ảnh, mặc định `../datasets/imagenet/val` |
-| `LABELS_CSV` | CSV ground truth; chuỗi rỗng để dùng ImageFolder |
-| `VAL_DIR` | Thư mục validation tùy chọn khi dùng ImageFolder |
-| `MODEL_DIR` | Cache model timm, `./pretrained_models` |
-| `OUT_DIR` | Gốc kết quả, `./runs` |
-| `BATCH_SIZE`, `EVAL_BATCH_SIZE` | Batch tạo ảnh / micro-batch đánh giá, mặc định 4 |
-| `NUM_IMAGES` | Số ảnh clean-correct cần chọn, mặc định 1.000 |
-| `NUM_BATCHES` | Giới hạn số batch; nếu chưa đặt NUM_IMAGES thì suy ra NUM_IMAGES = NUM_BATCHES × BATCH_SIZE |
-| `SELECTED_CSV` | Tập con cố định; mặc định `runs/selected_<NUM_IMAGES>.csv` |
-| `DEVICE`, `NUM_WORKERS`, `SEED` | Thiết bị, worker và seed; mặc định `auto`, 2, 0 trong common.sh |
-| `ADV_STORAGE_MODE` | `delta_fp16` mặc định trong pipeline; `adv_fp32` để giữ tensor chính xác hơn |
-| `ADV_BATCH_ROOT` | Gốc batch tạm, mặc định `<OUT_DIR>/adv_batches` |
-| `DELETE_ADV_AFTER_USE` | 1: xóa batch đã dùng sau khi ghi kết quả thành công; 0: giữ lại |
-| `FORCE_ATTACKS` | 1: bắt buộc tạo lại ảnh ở các launcher hỗ trợ reuse |
+Đường dẫn tương đối được hiểu theo gốc repository, kể cả khi gọi launcher từ thư mục khác. `sh/common.sh` phụ trách đọc/kiểm tra cấu hình và các hàm chạy chung; giá trị dùng để chỉnh thí nghiệm nằm trong `experiment.venv`. Các lớp Python không tự đọc file Bash này: khi gọi Python trực tiếp, truyền các cờ CLI tương ứng.
 
-Tập con đã chọn là một phần của thí nghiệm. Khi thay dữ liệu, nhãn, seed hoặc surrogate để chọn mẫu, hãy dùng `SELECTED_CSV` và `OUT_DIR` mới; không xem việc file tồn tại là bằng chứng rằng tập con vẫn đúng với cấu hình mới.
+| Nhóm | Tham số | Mặc định / ý nghĩa |
+| --- | --- | --- |
+| Dữ liệu | `DATA_DIR`, `LABELS_CSV`, `VAL_DIR` | Gốc ảnh, CSV nhãn; `LABELS_CSV=""` để dùng ImageFolder |
+| Đầu ra | `MODEL_DIR`, `OUT_DIR`, `ADV_BATCH_ROOT` | Cache model, kết quả và batch tạm |
+| Thiết bị | `PY`, `DEVICE`, `NUM_WORKERS`, `SEED` | `python3`, `auto`, 2, 0 |
+| Batch | `BATCH_SIZE` | 16; kích thước batch logic cho chọn ảnh/attack/runtime |
+| Batch đánh giá | `EVAL_BATCH_SIZE`, `QUALITY_BATCH_SIZE` | Kế thừa `BATCH_SIZE` nếu chưa ghi đè |
+| OOM | `AUTO_BATCH`, `MIN_BATCH_SIZE` | 1 và 1; bật giảm batch, tối thiểu một ảnh |
+| Ngân sách attack | `EPS`, `ALPHA`, `STEPS` | `16/255`, `1.6/255`, 10 |
+| Ngân sách defense | `DEFENSE_EPS`, `DEFENSE_ALPHA`, `DEFENSE_STEPS` | Kế thừa ngân sách chung; chỉ ghi đè cho Table VIII |
+| Số mẫu | `NUM_IMAGES`, `NUM_BATCHES`, `SELECTED_CSV` | 1.000 ảnh mặc định; CSV cố định cho thí nghiệm |
+| Lưu tensor | `ADV_STORAGE_MODE`, `DELETE_ADV_AFTER_USE` | `delta_fp16`, 1 |
+| Chạy lại | `FORCE_ATTACKS` | 1 để bỏ cache kết quả trong launcher có hỗ trợ reuse |
 
-Cache Bash kiểm tra cấu hình, nội dung CSV tập con và code Python; không băm toàn bộ trọng số/dữ liệu ảnh. Khi thay checkpoint tại cùng đường dẫn, cần đặt `FORCE_ATTACKS=1` hoặc dùng output mới. File cấu hình mẫu đã đặt `NUM_IMAGES=1000`, nên chỉ đặt thêm `NUM_BATCHES` sẽ giới hạn phần chạy nhưng vẫn chọn 1.000 ảnh; hãy sửa cả `NUM_IMAGES` cho lần chạy thử nhỏ.
-
-### 7.2. Chạy thử và chạy đầy đủ
+`EPS`, `ALPHA` phải hữu hạn và không âm; `STEPS`, các batch size và số mẫu phải là số nguyên dương. `STEPS` độc lập với `ALPHA`: khi đổi số bước, hãy chọn lại bước cập nhật phù hợp. Table VIII không tự đổi ngân sách thành 4/255; ví dụ muốn dùng ngân sách đó:
 
 ```bash
-# Chỉ 4 ảnh để kiểm tra Table V với một cấu hình.
-NUM_IMAGES=4 NUM_BATCHES=1 BATCH_SIZE=4 \
+DEFENSE_EPS=4/255 DEFENSE_ALPHA=0.4/255 DEFENSE_STEPS=10 \
+bash sh/run_table8_defense.sh
+```
+
+Cache tính cả ngân sách attack, cấu hình batch, CSV tập con và code. Tập con đã chọn vẫn là một phần của thí nghiệm: khi đổi dữ liệu, nhãn, seed, checkpoint hoặc model dùng chọn mẫu, dùng CSV/output mới để chọn lại ảnh sạch đúng. Cache không băm nội dung toàn bộ checkpoint và ảnh.
+
+### 7.2. Batch tự giảm khi CUDA OOM
+
+Mỗi lệnh bắt đầu với batch đã yêu cầu, mặc định 16. Khi gặp lỗi **CUDA out of memory trong xử lý ảnh**, chương trình giải phóng tensor của lần lỗi rồi giảm một nửa số ảnh của phần xử lý đang lỗi, làm tròn xuống và chặn ở `MIN_BATCH_SIZE`. Với batch đủ 16 ảnh, chuỗi điển hình là 16 → 8 → 4 → 2 → 1; batch cuối có 5 ảnh sẽ giảm 5 → 2 → 1 nếu tiếp tục OOM. Chỉ phần chưa hoàn thành được thử lại; kết quả thành công trước đó được giữ. Batch đã giảm được dùng tiếp trong cùng lần chạy; lệnh/method/target mới có thể bắt đầu lại ở batch đã cấu hình.
+
+Batch logic và batch thực thi được tách biệt. Ví dụ `BATCH_SIZE=16 NUM_BATCHES=10` vẫn yêu cầu tối đa **160 ảnh**, kể cả GPU chỉ chạy được 4 ảnh mỗi lần. Một file batch attack vẫn chứa tối đa 16 ảnh; evaluation đọc đủ các ảnh này theo các phần nhỏ hơn. Không bỏ ảnh và không giảm ngân sách thí nghiệm khi giảm batch thực thi. Khi có ít hơn số ảnh yêu cầu trong dataset, chỉ xử lý số ảnh thực có.
+
+Nếu chưa đặt `NUM_IMAGES` và đã đặt `NUM_BATCHES`, số ảnh cần chọn được suy ra bằng `NUM_BATCHES × BATCH_SIZE` **ban đầu**. Nếu đặt cả hai, `NUM_IMAGES` quyết định tập con được chọn và `NUM_BATCHES` giới hạn số batch logic được chạy.
+
+Để tắt cơ chế này hoặc đặt kích thước nhỏ ngay từ đầu:
+
+```bash
+AUTO_BATCH=0 BATCH_SIZE=8 bash sh/run_tables_1_8.sh
+```
+
+CLI Python tương ứng dùng `--no-auto-batch`, `--min-batch-size` và cờ batch size của từng script. Lỗi khác CUDA OOM được báo nguyên vẹn; nếu một ảnh vẫn OOM hoặc OOM ngay lúc nạp model, chương trình dừng với thông báo rõ ràng.
+
+Kích thước batch thực thi và số lần OOM được ghi cùng kết quả: tập con có `<selected.csv>.metadata.json`, attack có `attack_config.json` và cột microbatch trong CSV, evaluation có `eval_summary.json`, chất lượng ảnh có `quality_execution.json` trong mỗi thư mục attack, runtime có thêm các cột batch thực tế và số lần retry. Các cột peak VRAM của attack ghi cực đại trong các microbatch thành công, không tính lần chạy OOM đã bị hủy.
+
+Đổi batch có thể thay đổi phép lấy mẫu view ngẫu nhiên và thống kê phụ thuộc batch; không bảo đảm ảnh adversarial giống từng bit giữa hai GPU. Khi so sánh thuật toán hoặc runtime chính thức, nên chọn batch cố định mà mọi phương pháp chạy được, lưu cấu hình và kiểm tra metadata thực thi.
+
+Các lệnh chạy:
+
+```bash
+# Lần thử nhỏ trên máy thực nghiệm: 16 ảnh, một cấu hình Table V.
+NUM_IMAGES=16 NUM_BATCHES=1 \
 TABLE5P_SETTINGS=cnn_to_vit TABLE5P_VARIANTS=full_model \
 bash sh/run_table5_ablation.sh
 
@@ -441,8 +474,6 @@ bash sh/run_all_outputs.sh
 bash sh/run_table5_sv_fca_5000.sh
 ```
 
-Chạy tất cả bao gồm tải/load nhiều model, hàng loạt attack và checkpoint defense; nên chạy thử nhỏ trước. Khi thay đổi code tiền xử lý hoặc công thức, dùng thư mục kết quả mới và chọn lại ảnh clean-correct.
-
 ### 7.3. CLI độc lập
 
 ```bash
@@ -450,19 +481,19 @@ python scripts/select_imagenet_subset.py \
   --data-dir /data/imagenet/val \
   --labels-csv /data/imagenet/imagenet_val_labels.csv \
   --surrogates resnet50,densenet121,vit_base_patch16_224,deit_small_patch16_224 \
-  --num-images 1000 --batch-size 4 --device cuda \
+  --num-images 1000 --batch-size 16 --device cuda \
   --out-csv runs/selected_1000.csv
 
 python scripts/run_attack.py \
   --data-dir /data/imagenet/val --selected-csv runs/selected_1000.csv \
   --surrogates resnet50 --attack sv_fca --variant full_model \
   --eps 0.06274509803921569 --alpha 0.006274509803921569 --steps 10 \
-  --num-views 4 --spectral-bands 6 --batch-size 4 --device cuda \
+  --num-views 4 --spectral-bands 6 --batch-size 16 --device cuda \
   --storage-mode adv_fp32 --out-dir runs/example
 
 python scripts/evaluate.py \
   --attack-dir runs/example --data-dir /data/imagenet/val \
-  --targets resnet152,inception_v3 --eval-batch-size 4 --device cuda
+  --targets resnet152,inception_v3 --eval-batch-size 16 --device cuda
 ```
 
 ### 7.4. Các launcher và đầu ra
@@ -542,7 +573,7 @@ SSIM ở đây dùng cửa sổ **trung bình đều 11 × 11**, zero-padding, l
 \mathrm{relative\ cost}=\frac{\mathrm{ms/image}_{\mathrm{method}}}{\mathrm{ms/image}_{\mathrm{DI\text{-}FGSM}}}.
 ```
 
-Warmup chạy riêng và không tính vào số đo. CUDA được synchronize trước/sau đoạn đo. Thời gian bao gồm việc thực thi attack và logging bên trong attack; không tính tải checkpoint, đọc dataset, lưu batch hay đánh giá target. Baseline relative cost là DI-FGSM; nếu danh sách không có DI-FGSM thì dùng method đầu tiên. So sánh phải dùng cùng phần cứng, source set, batch size, số bước và chế độ precision. `RUNTIME_IMAGES` mặc định 128. Khi đặt `NUM_BATCHES`, giới hạn này **thay thế** `RUNTIME_IMAGES`: đo theo số batch, không bao gồm warmup. Khi không đặt `NUM_BATCHES`, code mới giới hạn theo số ảnh và cắt batch cuối trước khi đo.
+Warmup chạy riêng và không tính vào số đo. CUDA được synchronize trước/sau đoạn đo. Thời gian bao gồm việc thực thi attack và logging bên trong attack; không tính tải checkpoint, đọc dataset, chuyển tensor lên GPU, lưu batch, đánh giá target hoặc thời gian của lần chạy bị OOM. Chỉ thời gian các microbatch thành công đóng góp vào ms/image; số lần thử lại được báo riêng. Baseline relative cost là DI-FGSM; nếu danh sách không có DI-FGSM thì dùng method đầu tiên. So sánh phải dùng cùng phần cứng, source set, batch size, số bước và chế độ precision. `RUNTIME_IMAGES` mặc định 128. Khi đặt `NUM_BATCHES`, giới hạn này **thay thế** `RUNTIME_IMAGES`: đo theo số batch, không bao gồm warmup. Khi không đặt `NUM_BATCHES`, code mới giới hạn theo số ảnh và cắt batch cuối trước khi đo.
 
 ### 8.4. Batch lưu trên đĩa và hình minh họa
 
@@ -558,6 +589,7 @@ Mỗi attack ghi `attack_config.json`, `attack_batches.csv`, `attack_steps.csv` 
 
 ```bash
 python -m compileall -q attacks src scripts tests
+bash -n experiment.venv
 for script in sh/*.sh; do bash -n "$script"; done
 for script in scripts/*.py; do python "$script" --help > /dev/null; done
 MPLBACKEND=Agg OMP_NUM_THREADS=1 python -m pytest -q
@@ -570,7 +602,7 @@ attacks/                 Baseline, factory và SV-FCA
 src/                     Dataset, wrapper model, FFT, metric và tiện ích
 scripts/                 CLI chọn ảnh, attack, evaluate, bảng và hình
 sh/                      Bash launcher và cấu hình dùng chung
-configs/                 Mẫu biến môi trường
+experiment.venv          Cấu hình chung duy nhất cho tất cả launcher
 tests/                   Kiểm thử hồi quy nhỏ, không cần trọng số pretrained
 .github/workflows/       Kiểm tra tự động trên GitHub
 requirements*.txt        Dependencies chính, tùy chọn và kiểm thử

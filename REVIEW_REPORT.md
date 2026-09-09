@@ -47,3 +47,15 @@ Môi trường kiểm tra: WSL Linux, Python 3.12.3, PyTorch 2.14.0+cpu, torchvi
 Kiểm thử sử dụng model nhỏ và dữ liệu tổng hợp, không tải trọng số nghiên cứu. Chưa chạy đầy đủ ImageNet, Tables I–VIII, CUDA/AMP, LPIPS pretrained hoặc các checkpoint RobustBench thật. Vì sửa preprocessing, consensus, FFT và SI-NI, kết quả từ bản cũ cần chọn lại tập con và chạy lại vào thư mục output mới.
 
 Các công thức được kiểm tra bằng MathJax. Kiểm tra cú pháp/định dạng không chứng minh tính mới của phương pháp hoặc chất lượng chuyển giao; các kết luận đó cần số liệu thực nghiệm.
+
+## Cập nhật cấu hình và xử lý OOM
+
+- Gom cấu hình vào `experiment.venv`; `sh/common.sh` tự đọc, kiểm tra tham số và cung cấp các hàm gọi chung. Thay mẫu `configs/sv_fca_tables_1_8.env.example` bằng file cấu hình này.
+- Mặc định batch 16 cho chọn ảnh, attack, evaluation, quality và runtime. Khi xử lý ảnh gặp CUDA OOM, giảm kích thước phần thực thi và thử lại đúng phần lỗi; giữ batch logic, thứ tự ảnh và giới hạn số mẫu.
+- `EPS`, `ALPHA`, `STEPS` chỉnh được ở cấu hình chung; hỗ trợ phân số như `4/255`. Table VIII có `DEFENSE_EPS`, `DEFENSE_ALPHA`, `DEFENSE_STEPS` kế thừa hoặc ghi đè ngân sách riêng.
+- Khôi phục trạng thái RNG sau lần lỗi, giải phóng tensor trước khi retry và chỉ cộng số liệu của phần đã hoàn thành. Ghi metadata batch thực tế/OOM để so sánh thí nghiệm.
+- CPU OOM, lỗi model khác và OOM khi tải trọng số không bị che bằng vòng retry batch. Đổi cách chia batch có thể thay đổi các biến đổi ngẫu nhiên hoặc thống kê phụ thuộc batch; không khẳng định tương đương từng bit với batch ban đầu.
+
+Kiểm thử cập nhật: **51 tests và 29 subtests đạt trong 77,38 giây**, một luồng CPU, vô hiệu hóa GPU; dùng tensor/model giả và OOM mô phỏng. Không tải checkpoint, không chạy ImageNet hoặc phép đo hiệu năng thật. Thư viện kiểm thử được tái sử dụng từ cache cục bộ. Python/Bash syntax, CLI mới và `pip check` đều đạt. Warning Matplotlib Axes3D của môi trường tạm không ảnh hưởng các kiểm thử này.
+
+README hiện có 123 công thức. Bản sửa hiển thị trước đó đã được xác nhận trực tiếp trên GitHub (123/123 render, không lỗi macro); cập nhật cấu hình giữ nguyên các công thức và kiểm tra lại cú pháp MathJax.

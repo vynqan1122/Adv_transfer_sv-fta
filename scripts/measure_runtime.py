@@ -15,6 +15,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from attacks import build_attack
+from src.batching import AdaptiveBatchExecutor, model_loading_oom_hint
 from src.datasets import ImageNetCSVDataset, collate_with_paths, imagenet_transform
 from src.models import load_models
 from src.utils import get_device, parse_model_list, set_model_cache_dir, set_seed
@@ -32,17 +33,41 @@ METHOD_LABELS = {
 }
 
 
-def measure_attack(attack, models, loader, device, max_images=128, num_batches=None, warmup_batches=1):
-    """Warm up separately, then time the actual measured batches and image count."""
-    if max_images <= 0 or warmup_batches < 0 or (num_batches is not None and num_batches <= 0):
-        raise ValueError("Runtime limits must be positive and warmup_batches nonnegative")
-    for images, labels, _paths in islice(loader, warmup_batches):
-        result = attack(models, images.to(device), labels.to(device))
-        del result, images, labels
+def runtime_chunk(attack, models, images, labels, device, start, end, measure=True):
+    """Return only successful attack time; copies and failed attempts are excluded."""
+    inputs, targets = images[start:end].to(device), labels[start:end].to(device)
     if device.type == "cuda":
         torch.cuda.synchronize(device)
+    started = time.perf_counter() if measure else None
+    result = attack(models, inputs, targets)
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    elapsed = time.perf_counter() - started if measure else 0.0
+    del result
+    return elapsed
+
+
+def measure_attack(attack, models, loader, device, max_images=128, num_batches=None, warmup_batches=1,
+                   executor=None, measurement_metadata=None):
+    """Warm up separately and retain logical sample budgets if CUDA chunks shrink.
+
+    The historical (ms_per_image, images, logical_batches) return value is kept.
+    Pass measurement_metadata={} to also collect actual measured chunk sizes.
+    """
+    if max_images <= 0 or warmup_batches < 0 or (num_batches is not None and num_batches <= 0):
+        raise ValueError("Runtime limits must be positive and warmup_batches nonnegative")
+    if executor is None:
+        executor = AdaptiveBatchExecutor(getattr(loader, "batch_size", None) or 16, device, context="runtime")
+    initial_retries = executor.oom_retries
+    for images, labels, _paths in islice(loader, warmup_batches):
+        process = lambda start, end: runtime_chunk(attack, models, images, labels, device, start, end, measure=False)
+        for _start, _end, _elapsed in executor.iter_batches(len(images), process):
+            pass
+    warmup_retries = executor.oom_retries - initial_retries
     n_seen = 0
     batches = 0
+    microbatches = 0
+    measured_sizes = set()
     elapsed = 0.0
     for images, labels, _paths in loader:
         if num_batches is not None and batches >= num_batches:
@@ -52,19 +77,24 @@ def measure_attack(attack, models, loader, device, max_images=128, num_batches=N
             if remaining <= 0:
                 break
             images, labels = images[:remaining], labels[:remaining]
-        images, labels = images.to(device), labels.to(device)
-        if device.type == "cuda":
-            torch.cuda.synchronize(device)
-        started = time.perf_counter()
-        result = attack(models, images, labels)
-        if device.type == "cuda":
-            torch.cuda.synchronize(device)
-        elapsed += time.perf_counter() - started
+        process = lambda start, end: runtime_chunk(attack, models, images, labels, device, start, end)
+        for start, end, chunk_elapsed in executor.iter_batches(len(images), process):
+            elapsed += chunk_elapsed
+            microbatches += 1
+            measured_sizes.add(end - start)
         n_seen += images.size(0)
         batches += 1
-        del result, images, labels
     if not n_seen:
         raise ValueError("No images available for runtime measurement")
+    if measurement_metadata is not None:
+        measurement_metadata.update(executor.metadata)
+        measurement_metadata.update({
+            "measured_microbatches": microbatches,
+            "measured_batch_sizes": sorted(measured_sizes),
+            "warmup_oom_retries": warmup_retries,
+            "measured_oom_retries": executor.oom_retries - initial_retries - warmup_retries,
+            "timing_scope": "successful_attack_calls_only; excludes transfers and OOM retries",
+        })
     return elapsed / n_seen * 1000.0, n_seen, batches
 
 
@@ -79,7 +109,9 @@ def main():
     ap.add_argument("--max-images", type=int, default=128)
     ap.add_argument("--num-batches", type=int, default=None, help="Measure N batches after a separate warmup pass; overrides --max-images.")
     ap.add_argument("--warmup-batches", type=int, default=1)
-    ap.add_argument("--batch-size", type=int, default=8)
+    ap.add_argument("--batch-size", type=int, default=16)
+    ap.add_argument("--no-auto-batch", action="store_true", help="Disable automatic CUDA OOM batch-size reduction.")
+    ap.add_argument("--min-batch-size", type=int, default=1)
     ap.add_argument("--num-workers", type=int, default=2)
     ap.add_argument("--device", default="auto")
     ap.add_argument("--eps", type=float, default=16.0/255.0)
@@ -102,6 +134,8 @@ def main():
     args = ap.parse_args()
     if args.batch_size <= 0 or args.max_images <= 0 or args.num_workers < 0 or args.warmup_batches < 0:
         ap.error("Batch/image counts must be positive; workers/warmup must be nonnegative")
+    if not 1 <= args.min_batch_size <= args.batch_size:
+        ap.error("--min-batch-size must be between 1 and --batch-size")
     if args.num_batches is not None and args.num_batches <= 0:
         ap.error("--num-batches must be positive")
     if not parse_model_list(args.surrogates) or not parse_model_list(args.methods):
@@ -112,7 +146,8 @@ def main():
     device = get_device(args.device)
     dataset = ImageNetCSVDataset(args.data_dir, args.selected_csv, transform=imagenet_transform())
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, collate_fn=collate_with_paths)
-    models = load_models(parse_model_list(args.surrogates), device=device, pretrained=True)
+    with model_loading_oom_hint(device, "runtime source models"):
+        models = load_models(parse_model_list(args.surrogates), device=device, pretrained=True)
     for model in models.values():
         model.eval()
         model.requires_grad_(False)
@@ -142,11 +177,15 @@ def main():
             amp_dtype=args.amp_dtype,
             log_spectral_energy=args.log_spectral_energy,
         )
+        executor = AdaptiveBatchExecutor(args.batch_size, device, not args.no_auto_batch, args.min_batch_size,
+                                         context="runtime " + method)
+        metadata = {}
         ms, measured_images, measured_batches = measure_attack(
-            attack, models, loader, device, args.max_images, args.num_batches, args.warmup_batches
-        )
+            attack, models, loader, device, args.max_images, args.num_batches, args.warmup_batches,
+            executor=executor, measurement_metadata=metadata)
         results.append({"method_key": method, "Method": METHOD_LABELS.get(method, method),
-                        "Time/Image (ms)": ms, "Images": measured_images, "Measured Batches": measured_batches})
+                        "Time/Image (ms)": ms, "Images": measured_images, "Measured Batches": measured_batches,
+                        "batch_execution": metadata})
 
     base = None
     for r in results:
@@ -158,15 +197,26 @@ def main():
 
     out_rows = []
     for r in results:
+        metadata = r["batch_execution"]
         out_rows.append({
             "Method": r["Method"], "Images": r["Images"], "Measured Batches": r["Measured Batches"],
             "Time/Image (ms)": "{:.2f}".format(r["Time/Image (ms)"]),
             "Relative Cost": "{:.2f}x".format(r["Time/Image (ms)"] / max(base, 1e-12)),
+            "Requested Batch Size": metadata["requested_batch_size"],
+            "Effective Batch Size": metadata["effective_batch_size"],
+            "Measured Microbatches": metadata["measured_microbatches"],
+            "Measured Batch Sizes": ",".join(map(str, metadata["measured_batch_sizes"])),
+            "Warmup OOM Retries": metadata["warmup_oom_retries"],
+            "Measured OOM Retries": metadata["measured_oom_retries"],
+            "Seed": args.seed,
+            "Auto Batch": metadata["auto_batch"],
+            "RNG Restored On Retry": metadata["rng_restored_on_retry"],
+            "Timing Scope": metadata["timing_scope"],
         })
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["Method", "Time/Image (ms)", "Relative Cost", "Images", "Measured Batches"])
+        writer = csv.DictWriter(f, fieldnames=list(out_rows[0]))
         writer.writeheader()
         writer.writerows(out_rows)
     print("Saved", args.out)

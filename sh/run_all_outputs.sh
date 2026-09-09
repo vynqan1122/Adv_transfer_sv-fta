@@ -6,7 +6,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-cd "$PROJECT_ROOT"
+source "$SCRIPT_DIR/common.sh"
 
 if [[ "${SKIP_TABLES:-0}" != "1" ]]; then
   RUN_FIGURES=0 bash sh/run_tables_1_8.sh

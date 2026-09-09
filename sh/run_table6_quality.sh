@@ -9,7 +9,6 @@ FINAL="$ROOT/table6_quality.csv"
 TMP_MANIFEST="$ROOT/.one_attack_manifest.csv"
 TMP_RESULT="$ROOT/.one_attack_quality.csv"
 METHODS=(difgsm ifgsm mifgsm si_ni_fgsm tifgsm vit_aware freq_only ours)
-: "${QUALITY_BATCH_SIZE:=4}"
 
 label_method() {
   case "$1" in
@@ -41,25 +40,7 @@ for family_key in cnn_surrogates vit_surrogates; do
     mkdir -p "$dir"
     echo "[Table VI] family=$family method=$method"
 
-    "$PY" scripts/run_attack.py \
-      --data-dir "$DATA_DIR" \
-      --selected-csv "$SELECTED_CSV" \
-      --models-dir "$MODEL_DIR" \
-      --surrogates "$sources" \
-      --attack "$method" \
-      --variant full_model \
-      --fusion robust \
-      --out-dir "$dir" \
-      --adv-batch-dir "$(central_adv_batch_dir "$dir")" \
-      "${clear_adv_args[@]}" \
-      "${num_batch_args[@]}" \
-      "${memory_attack_args[@]}" \
-      "${svfca_amp_args[@]}" \
-      "${svfca_core_args[@]}" \
-      --batch-size "$BATCH_SIZE" \
-      --num-workers "$NUM_WORKERS" \
-      --device "$DEVICE" \
-      --seed "$SEED"
+    run_attack_once "$method" "$sources" "$dir"
 
     "$PY" - "$TMP_MANIFEST" "$family" "$(label_method "$method")" "$dir" <<'PY_QUALITY_MANIFEST'
 import csv, sys
@@ -80,11 +61,12 @@ PY_QUALITY_MANIFEST
       --out "$TMP_RESULT" \
       "${quality_batch_args[@]}" \
       --quality-batch-size "$QUALITY_BATCH_SIZE" \
+      "${adaptive_batch_args[@]}" \
       "${quality_delete_args[@]}" \
       --device "$DEVICE"
 
     tail -n +2 "$TMP_RESULT" >> "$FINAL"
-    rm -f "$TMP_MANIFEST" "$TMP_RESULT"
+    rm -f "$TMP_MANIFEST" "$TMP_RESULT" "${TMP_RESULT%.csv}.execution.json"
   done
 done
 

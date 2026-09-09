@@ -1,5 +1,6 @@
 """Offline Bash workflow regression tests; no dataset or models needed."""
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -122,6 +123,25 @@ def test_shell_workflows():
             run(script.name)
         print(f'PASS bash syntax and external-cwd execution: {len(scripts)} scripts')
 
+        # Every computational entry point must receive the same adaptive policy;
+        # attack/runtime budgets must not silently fall back to CLI defaults.
+        batch_flags = {'run_attack.py': '--batch-size',
+                       'select_imagenet_subset.py': '--batch-size',
+                       'evaluate.py': '--eval-batch-size',
+                       'compute_perceptual_quality.py': '--quality-batch-size',
+                       'measure_runtime.py': '--batch-size'}
+        for call in calls():
+            args = call['args']
+            if call['script'] in batch_flags:
+                assert args[batch_flags[call['script']]] == '2', call
+                assert args['--min-batch-size'] == '1', call
+                assert '--no-auto-batch' not in args, call
+            if call['script'] in ('run_attack.py', 'measure_runtime.py'):
+                assert math.isclose(float(args['--eps']), 16/255), call
+                assert math.isclose(float(args['--alpha']), 1.6/255), call
+                assert args['--steps'] == '10', call
+        print('PASS common budgets and adaptive batch policy reach every CLI')
+
         before = len(calls())
         run('run_table8_defense.sh')
         assert any(r['script']=='run_attack.py' for r in calls()[before:]), 'deleted tensors reused'
@@ -134,6 +154,30 @@ def test_shell_workflows():
         run('run_table5_prime.sh', {'SVFCA_BAND_TEMPERATURE':'0.5'})
         assert any(r['script']=='run_attack.py' for r in calls()[before:]), 'changed configuration reused stale results'
         print('PASS Table V reuses only matching configuration')
+
+        for changed in ({'EPS': '4/255'}, {'ALPHA': '0.4/255'}, {'STEPS': '20'},
+                        {'AUTO_BATCH': '0'}, {'MIN_BATCH_SIZE': '2'}):
+            # Reset to the same base before testing each independent key.
+            run('run_table5_prime.sh')
+            before = len(calls())
+            run('run_table5_prime.sh', changed)
+            new_calls = calls()[before:]
+            assert any(r['script'] == 'run_attack.py' for r in new_calls), changed
+            if changed.get('AUTO_BATCH') == '0':
+                for call in new_calls:
+                    if call['script'] in ('run_attack.py', 'evaluate.py'):
+                        assert call['args']['--no-auto-batch'] is True, call
+        print('PASS budget and OOM policy changes invalidate cached results')
+
+        before = len(calls())
+        run('run_table8_defense.sh', {'EPS': '8/255', 'ALPHA': '0.8/255', 'STEPS': '11',
+                                    'DEFENSE_EPS': '4/255', 'DEFENSE_ALPHA': '0.4/255',
+                                    'DEFENSE_STEPS': '20'})
+        defense_call = next(r for r in calls()[before:] if r['script'] == 'run_attack.py')
+        assert math.isclose(float(defense_call['args']['--eps']), 4/255)
+        assert math.isclose(float(defense_call['args']['--alpha']), 0.4/255)
+        assert defense_call['args']['--steps'] == '20'
+        print('PASS independent defense budget reaches Table VIII')
 
         before = len(calls())
         run('run_all_outputs.sh', {'RUN_FIGURES':'1','SKIP_TABLES1_4':'1','SKIP_TABLE5':'1',
@@ -164,5 +208,70 @@ def test_shell_workflows():
         print('PASS select_5000 selects 5000 images by default')
 
 
+def test_config_preview():
+    """Validate editable config/precedence without importing ML dependencies."""
+    if sys.platform == 'win32' or not shutil.which('bash'):
+        raise unittest.SkipTest('Bash configuration test requires Linux or macOS')
+    with tempfile.TemporaryDirectory(prefix='config-review-') as temp:
+        tmp = Path(temp)
+        env = {key: os.environ[key] for key in ('PATH', 'LANG', 'LC_ALL', 'TMPDIR') if key in os.environ}
+        env.update(PY=sys.executable, OUT_DIR=str(tmp/'not-created'))
+
+        def preview(overrides=None):
+            return subprocess.run(['bash', str(ROOT/'sh/common.sh')], cwd=tmp,
+                                  env=dict(env, **(overrides or {})), text=True,
+                                  capture_output=True)
+
+        result = preview()
+        assert result.returncode == 0, result.stderr
+        assert '16 / 16 / 16' in result.stdout, result.stdout
+        assert '1 / 1' in result.stdout, result.stdout
+        assert not Path(env['OUT_DIR']).exists(), 'preview created output directories'
+
+        overlay = tmp/'experiment.local.venv'
+        overlay.write_text(': "${EPS:=4/255}"\n: "${ALPHA:=0.4/255}"\n'
+                           ': "${STEPS:=20}"\n: "${BATCH_SIZE:=8}"\n'
+                           ': "${NUM_BATCHES:=3}"\n: "${SKIP_TABLES1_4:=1}"\n'
+                           ': "${SKIP_TABLE5:=1}"\n: "${SKIP_TABLE6:=1}"\n'
+                           ': "${SKIP_TABLE7:=1}"\n: "${SKIP_TABLE8:=1}"\n')
+        result = preview({'CONFIG_FILE': str(overlay)})
+        assert result.returncode == 0, result.stderr
+        assert '8 / 8 / 8' in result.stdout, result.stdout
+        assert 'Selected images:        24' in result.stdout, result.stdout
+        assert f'{4/255:.17g} / {float(2/1275):.17g} / 20' in result.stdout, result.stdout
+
+        result = preview({'CONFIG_FILE': str(overlay), 'BATCH_SIZE': '16', 'STEPS': '7'})
+        assert result.returncode == 0, result.stderr
+        assert '16 / 16 / 16' in result.stdout, result.stdout
+        assert 'Selected images:        48' in result.stdout, result.stdout
+        assert f'{4/255:.17g} / {float(2/1275):.17g} / 7' in result.stdout, result.stdout
+
+        # Parent launchers must load skip flags from the config file themselves.
+        result = subprocess.run(['bash', str(ROOT/'sh/run_tables_1_8.sh')], cwd=tmp,
+                                env=dict(env, CONFIG_FILE=str(overlay)), text=True,
+                                capture_output=True)
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        assert result.stdout.count('[SKIP]') == 5, result.stdout
+        assert not Path(env['OUT_DIR']).exists()
+
+        result = preview({'EPS': '0', 'ALPHA': '0'})
+        assert result.returncode == 0, result.stderr
+        assert '0 / 0 / 10' in result.stdout, result.stdout
+
+        for invalid in ({'EPS': '1/0'}, {'EPS': 'nan'}, {'EPS': '2'},
+                        {'ALPHA': '-1/255'}, {'ALPHA': '1+2'}, {'STEPS': '0'},
+                        {'BATCH_SIZE': '0'}, {'AUTO_BATCH': 'yes'},
+                        {'MIN_BATCH_SIZE': '17'}, {'NUM_WORKERS': '-1'},
+                        {'SVFCA_BAND_TEMPERATURE': '0'}, {'SVFCA_DECAY': 'inf'},
+                        {'SVFCA_DIVERSITY_PROB': '2'}, {'SVFCA_SPECTRAL_DECAY': '-0.1'},
+                        {'SVFCA_SPECTRAL_DECAY': '1'}, {'SVFCA_SPECTRAL_BANDS': '1'},
+                        {'CONFIG_FILE': str(tmp/'missing.venv')}):
+            result = preview(invalid)
+            assert result.returncode != 0, invalid
+            assert '[config]' in result.stderr, (invalid, result.stderr)
+        print('PASS standalone config preview, defaults, overlays, precedence and early validation')
+
+
 if __name__ == '__main__':
+    test_config_preview()
     test_shell_workflows()

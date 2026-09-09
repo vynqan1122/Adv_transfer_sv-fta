@@ -27,6 +27,7 @@ outputs/
 !.env.example
 configs/*.env
 !configs/*.env.example
+*.local.venv
 .idea/
 .vscode/
 .DS_Store

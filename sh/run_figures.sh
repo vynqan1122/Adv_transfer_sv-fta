@@ -2,8 +2,9 @@
 set -euo pipefail
 # Use exact FP32 temporary storage for publication figures by default, then
 # delete it after figures are written. FIG_ADV_STORAGE_MODE can override this.
-export ADV_STORAGE_MODE="${FIG_ADV_STORAGE_MODE:-adv_fp32}"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
+ADV_STORAGE_MODE="$FIG_ADV_STORAGE_MODE"
+memory_attack_args=(--empty-cache-every "$EMPTY_CACHE_EVERY" --storage-mode "$ADV_STORAGE_MODE")
 ensure_selected
 
 mkdir -p "$FIG_ROOT"
