@@ -98,14 +98,83 @@ def _pairwise_consensus_from_unit_sum(unit_sum, n, squared_norm_sum=None):
     return consensus.clamp(-1.0, 1.0)
 
 
-def _low_mid_prior(num_bands, device, strength=1.0):
-    """Smooth positive prior peaking in the low-to-mid spectral region."""
+def _low_mid_prior(num_bands, device, strength=1.0, floor=0.05, center=0.30, width=0.22):
+    """Return a normalized low/mid transfer prior for each radial band."""
+    if num_bands < 2:
+        raise ValueError("num_bands must be at least 2")
+    if not math.isfinite(strength) or strength < 0:
+        raise ValueError("strength must be finite and nonnegative")
+    if not math.isfinite(floor) or not 0 < floor <= 1:
+        raise ValueError("floor must be in (0, 1]")
+    if not math.isfinite(center) or not 0 <= center <= 1:
+        raise ValueError("center must be in [0, 1]")
+    if not math.isfinite(width) or width <= 0:
+        raise ValueError("width must be positive")
     centers = (torch.arange(num_bands, device=device, dtype=torch.float32) + 0.5) / float(num_bands)
-    # Broad peak around 0.30, non-zero floor to avoid deleting high frequency.
-    base = 0.15 + torch.exp(-0.5 * ((centers - 0.30) / 0.30).pow(2))
+    # A focused, positive peak avoids the nearly uniform weights of the old prior.
+    base = 0.10 + torch.exp(-0.5 * ((centers - center) / width).pow(2))
     base = base / base.max().clamp_min(_EPS)
-    # strength=0 -> uniform prior; 1 -> default; >1 sharper preference.
-    return base.clamp_min(0.05).pow(max(float(strength), 0.0))
+    return base.clamp_min(floor).pow(strength)
+
+
+def _band_energy_features(band_energy, eps=_EPS):
+    """Convert source-view band energies to centered log-energy features.
+
+    The feature is zero when every band has equal energy and positive for a
+    band carrying more energy than the per-image mean.  Centering prevents the
+    absolute gradient scale from changing the softmax temperature.
+    """
+    if band_energy.ndim != 3:
+        raise ValueError("band_energy must have shape [batch, bands, 1] or [batch, bands, channels]")
+    energy = band_energy.float().mean(dim=-1)
+    reference = energy.mean(dim=1, keepdim=True).clamp_min(eps)
+    return torch.log(energy.clamp_min(eps)) - torch.log(reference)
+
+
+def _compute_band_weights(
+    consensus,
+    band_energy,
+    band_temperature,
+    low_mid_strength,
+    consensus_gain=2.0,
+    energy_strength=0.75,
+    weight_floor=0.02,
+    use_consensus=True,
+    use_prior=True,
+):
+    """Fuse consensus, relative energy and prior into per-image band weights."""
+    if consensus.ndim != 2:
+        raise ValueError("consensus must have shape [batch, bands]")
+    if band_energy.ndim != 2 or band_energy.shape != consensus.shape:
+        raise ValueError("band_energy must have shape [batch, bands]")
+    temperature = float(band_temperature)
+    if not math.isfinite(temperature) or temperature <= 0:
+        raise ValueError("band_temperature must be finite and positive")
+    if not math.isfinite(consensus_gain) or consensus_gain < 0:
+        raise ValueError("consensus_gain must be finite and nonnegative")
+    if not math.isfinite(energy_strength) or energy_strength < 0:
+        raise ValueError("energy_strength must be finite and nonnegative")
+    if not math.isfinite(weight_floor) or not 0 <= weight_floor <= 1.0 / consensus.shape[1]:
+        raise ValueError("weight_floor must be in [0, 1 / num_bands]")
+
+    logits = torch.zeros_like(consensus, dtype=torch.float32)
+    if use_consensus:
+        logits = logits + float(consensus_gain) * consensus.float()
+    if energy_strength > 0:
+        energy_features = _band_energy_features(band_energy.unsqueeze(-1))
+        logits = logits + float(energy_strength) * energy_features
+    if use_prior:
+        prior = _low_mid_prior(consensus.shape[1], consensus.device, low_mid_strength)
+        logits = logits + torch.log(prior.clamp_min(_EPS)).view(1, -1)
+    weights = torch.softmax(logits / temperature, dim=1)
+    # Keep every band weakly represented so one noisy FFT bin cannot erase all
+    # other transfer directions; the vector is renormalized per image.
+    if weight_floor > 0:
+        weights = weights.clamp_min(float(weight_floor))
+        weights = weights / weights.sum(dim=1, keepdim=True).clamp_min(_EPS)
+    if not torch.isfinite(weights).all():
+        raise FloatingPointError("SV-FCA produced nonfinite spectral band weights")
+    return weights
 
 
 def _variant_flags(raw_variant, default_views):
@@ -165,6 +234,7 @@ def _stream_source_view_frequency_stats(
     band_sums = None
     unit_sums = None
     unit_squared_norm_sums = None
+    band_energy_sums = None
     masks = None
     pool_count = 0
     loss_sum = 0.0
@@ -195,6 +265,7 @@ def _stream_source_view_frequency_stats(
                 if masks is None:
                     masks = _radial_rfft_masks(h, w, spectral_bands, grad_n.device)
                     band_sums = [torch.zeros_like(grad_n, dtype=torch.float32) for _ in range(spectral_bands)]
+                    band_energy_sums = [torch.zeros(x.shape[0], device=x.device, dtype=torch.float32) for _ in range(spectral_bands)]
                     if need_consensus:
                         unit_sums = [torch.zeros_like(grad_n, dtype=torch.float32) for _ in range(spectral_bands)]
                         unit_squared_norm_sums = [
@@ -205,6 +276,7 @@ def _stream_source_view_frequency_stats(
                 for b, mask in enumerate(masks):
                     band = torch.fft.irfft2(spectrum * mask, s=(h, w), dim=(-2, -1), norm="ortho").real
                     band_sums[b].add_(band)
+                    band_energy_sums[b].add_(band.flatten(1).norm(p=2, dim=1))
                     if need_consensus:
                         unit = _l2_unit(band)
                         unit_sums[b].add_(unit)
@@ -229,6 +301,7 @@ def _stream_source_view_frequency_stats(
     }
     if need_frequency:
         result["band_means"] = [b.div(float(pool_count)) for b in band_sums]
+        result["band_energy"] = torch.stack([e.div(float(pool_count)) for e in band_energy_sums], dim=1)
         if need_consensus:
             result["consensus"] = torch.stack(
                 [
@@ -253,9 +326,12 @@ class SVFCAAttack(Attack):
         image_size = int(self.kwargs.get("image_size", 224))
         resize_size = int(self.kwargs.get("resize_size", 256))
         decay = float(self.kwargs.get("decay", 1.0))
-        band_temperature = float(self.kwargs.get("band_temperature", 0.35))
+        band_temperature = float(self.kwargs.get("band_temperature", 0.20))
         low_mid_strength = float(self.kwargs.get("low_mid_strength", 1.0))
-        spectral_decay = float(self.kwargs.get("spectral_decay", 0.75))
+        spectral_decay = float(self.kwargs.get("spectral_decay", 0.65))
+        consensus_gain = float(self.kwargs.get("consensus_gain", 2.0))
+        energy_strength = float(self.kwargs.get("energy_strength", 0.75))
+        weight_floor = float(self.kwargs.get("weight_floor", 0.02))
         amp = bool(self.kwargs.get("amp", False))
         amp_dtype = str(self.kwargs.get("amp_dtype", "fp16"))
         if not math.isfinite(band_temperature) or band_temperature <= 0:
@@ -266,6 +342,12 @@ class SVFCAAttack(Attack):
             raise ValueError("low_mid_strength must be finite and nonnegative")
         if not math.isfinite(decay) or decay < 0:
             raise ValueError("decay must be finite and nonnegative")
+        if not math.isfinite(consensus_gain) or consensus_gain < 0:
+            raise ValueError("consensus_gain must be finite and nonnegative")
+        if not math.isfinite(energy_strength) or energy_strength < 0:
+            raise ValueError("energy_strength must be finite and nonnegative")
+        if not math.isfinite(weight_floor) or not 0 <= weight_floor <= 1.0 / spectral_bands:
+            raise ValueError("weight_floor must be in [0, 1 / spectral_bands]")
         if int(self.kwargs.get("num_views", 4)) < 1:
             raise ValueError("num_views must be positive")
         if amp_dtype not in ("fp16", "bf16"):
@@ -300,13 +382,17 @@ class SVFCAAttack(Attack):
                 consensus = None
             else:
                 consensus = stats["consensus"]
-                logits = torch.zeros_like(consensus)
-                if flags["band_consensus"]:
-                    logits = logits + consensus / band_temperature
-                if flags["low_mid_prior"]:
-                    prior = _low_mid_prior(spectral_bands, x.device, low_mid_strength)
-                    logits = logits + torch.log(prior.clamp_min(_EPS)).view(1, -1)
-                instant_weights = torch.softmax(logits, dim=1)
+                instant_weights = _compute_band_weights(
+                    consensus=consensus,
+                    band_energy=stats["band_energy"],
+                    band_temperature=band_temperature,
+                    low_mid_strength=low_mid_strength,
+                    consensus_gain=consensus_gain,
+                    energy_strength=energy_strength,
+                    weight_floor=weight_floor,
+                    use_consensus=flags["band_consensus"],
+                    use_prior=flags["low_mid_prior"],
+                )
 
                 if flags["spectral_memory"]:
                     if spectral_memory is None:
@@ -347,6 +433,9 @@ class SVFCAAttack(Attack):
                 "band_temperature": band_temperature,
                 "low_mid_strength": low_mid_strength,
                 "spectral_decay": spectral_decay,
+                "consensus_gain": consensus_gain,
+                "energy_strength": energy_strength,
+                "weight_floor": weight_floor,
                 "token_branch_enabled": False,
                 "target_access_during_attack": "none",
                 "amp_enabled": amp,
@@ -354,7 +443,9 @@ class SVFCAAttack(Attack):
             if consensus is not None:
                 c = consensus.detach().mean(dim=0).cpu().tolist()
                 w = used_weights.detach().mean(dim=0).cpu().tolist()
+                e = stats["band_energy"].detach().mean(dim=0).cpu().tolist()
                 log["band_consensus"] = ";".join("{:.6f}".format(v) for v in c)
+                log["band_energy"] = ";".join("{:.6f}".format(v) for v in e)
                 log["band_weights"] = ";".join("{:.6f}".format(v) for v in w)
             logs.append(log)
             del stats, direction

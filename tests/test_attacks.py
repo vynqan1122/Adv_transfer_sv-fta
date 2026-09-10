@@ -13,6 +13,8 @@ from attacks import build_attack
 from attacks.base import normalize_grad_l1, smooth_grad_ti
 from attacks.sinifgsm import SINIFGSM
 from attacks.sv_fca import (
+    _band_energy_features,
+    _compute_band_weights,
     _l2_unit,
     _pairwise_consensus_from_unit_sum,
     _stream_source_view_frequency_stats,
@@ -78,6 +80,23 @@ class AttackTests(unittest.TestCase):
         torch.testing.assert_close(stats["consensus"][:, 0], torch.ones(2))
         torch.testing.assert_close(stats["consensus"][:, 1:], torch.zeros(2, 2))
         torch.testing.assert_close(sum(stats["band_means"]), stats["spatial_mean"])
+
+    def test_band_weighting_responds_to_consensus_and_energy(self):
+        consensus = torch.tensor([[0.0, 0.0, 0.0], [0.9, 0.0, 0.0]])
+        energy = torch.tensor([[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]])
+        uniform = _compute_band_weights(consensus, energy, 0.2, 0.0, energy_strength=0.0)
+        selected = _compute_band_weights(consensus, energy, 0.2, 0.0, energy_strength=0.0)
+        torch.testing.assert_close(uniform[0], torch.full((3,), 1 / 3), atol=1e-6, rtol=1e-6)
+        self.assertGreater(selected[1, 0].item(), selected[1, 1].item())
+
+        energy_skew = torch.tensor([[4.0, 1.0, 1.0], [1.0, 4.0, 1.0]])
+        energy_weights = _compute_band_weights(
+            torch.zeros_like(consensus), energy_skew, 0.2, 0.0,
+            energy_strength=1.0, use_prior=False,
+        )
+        self.assertGreater(energy_weights[0, 0].item(), energy_weights[0, 1].item())
+        self.assertGreater(energy_weights[1, 1].item(), energy_weights[1, 0].item())
+        self.assertTrue(torch.isfinite(_band_energy_features(energy_skew.unsqueeze(-1))).all())
 
     def test_si_scale_gradient_matches_differentiated_mean_loss(self):
         model = torch.nn.Sequential(torch.nn.Flatten(), torch.nn.Linear(192, 5), torch.nn.Tanh(), torch.nn.Linear(5, 2))

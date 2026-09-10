@@ -75,7 +75,7 @@ require_positive_integer NUM_IMAGES "$NUM_IMAGES"
 # expressions. Downstream CLIs receive ordinary finite decimal numbers.
 resolved_budget=$("$PY" - "$EPS" "$ALPHA" "$DEFENSE_EPS" "$DEFENSE_ALPHA" \
   "$SVFCA_DIVERSITY_PROB" "$SVFCA_BAND_TEMPERATURE" "$SVFCA_LOW_MID_STRENGTH" \
-  "$SVFCA_SPECTRAL_DECAY" "$SVFCA_DECAY" <<'PY_BUDGET'
+  "$SVFCA_SPECTRAL_DECAY" "$SVFCA_DECAY" "$SVFCA_CONSENSUS_GAIN" "$SVFCA_ENERGY_STRENGTH" "$SVFCA_BAND_WEIGHT_FLOOR" "$SVFCA_SPECTRAL_BANDS" <<'PY_BUDGET'
 from fractions import Fraction
 import math
 import sys
@@ -97,14 +97,24 @@ rules = (
     ('SVFCA_LOW_MID_STRENGTH', lambda v: v >= 0, 'nonnegative'),
     ('SVFCA_SPECTRAL_DECAY', lambda v: 0 <= v < 1, 'in [0, 1)'),
     ('SVFCA_DECAY', lambda v: v >= 0, 'nonnegative'),
+    ('SVFCA_CONSENSUS_GAIN', lambda v: v >= 0, 'nonnegative'),
+    ('SVFCA_ENERGY_STRENGTH', lambda v: v >= 0, 'nonnegative'),
+    ('SVFCA_BAND_WEIGHT_FLOOR', lambda v: v >= 0, 'nonnegative'),
 )
-for (name, valid, requirement), raw in zip(rules, sys.argv[5:]):
+for (name, valid, requirement), raw in zip(rules, sys.argv[5:12]):
     try:
         value = float(raw)
         if not math.isfinite(value) or not valid(value):
             raise ValueError(f'must be finite and {requirement}')
     except ValueError as exc:
         raise SystemExit(f'[config] invalid {name}={raw!r}: {exc}') from None
+try:
+    band_floor = float(sys.argv[12])
+    bands = int(sys.argv[13])
+    if band_floor > 1.0 / bands:
+        raise ValueError('must be <= 1 / SVFCA_SPECTRAL_BANDS')
+except (ValueError, ZeroDivisionError) as exc:
+    raise SystemExit(f'[config] invalid SVFCA_BAND_WEIGHT_FLOOR={sys.argv[12]!r}: {exc}') from None
 print(' '.join(values))
 PY_BUDGET
 )
@@ -272,6 +282,9 @@ svfca_core_args=(
   --low-mid-strength "$SVFCA_LOW_MID_STRENGTH"
   --spectral-decay "$SVFCA_SPECTRAL_DECAY"
   --decay "$SVFCA_DECAY"
+  --consensus-gain "$SVFCA_CONSENSUS_GAIN"
+  --energy-strength "$SVFCA_ENERGY_STRENGTH"
+  --band-weight-floor "$SVFCA_BAND_WEIGHT_FLOOR"
 )
 
 delete_adv_args=()
@@ -366,6 +379,8 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
     'Attack / eval / quality:' "$BATCH_SIZE / $EVAL_BATCH_SIZE / $QUALITY_BATCH_SIZE" \
     'Auto batch / minimum:' "$AUTO_BATCH / $MIN_BATCH_SIZE" \
     'EPS / ALPHA / STEPS:' "$EPS / $ALPHA / $STEPS" \
+    'SV-FCA score gains:' "$SVFCA_CONSENSUS_GAIN / $SVFCA_ENERGY_STRENGTH" \
+    'Band floor / temperature:' "$SVFCA_BAND_WEIGHT_FLOOR / $SVFCA_BAND_TEMPERATURE" \
     'Defense budget:' "$DEFENSE_EPS / $DEFENSE_ALPHA / $DEFENSE_STEPS" \
     'Selected CSV:' "$SELECTED_CSV"
 fi

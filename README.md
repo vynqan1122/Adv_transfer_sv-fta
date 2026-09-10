@@ -314,17 +314,26 @@ Code chỉ tích lũy tổng band, tổng vector chuẩn hóa và tổng bình p
 Với $b=0,\ldots,B-1$, tâm band là $q_b=(b+0.5)/B$:
 
 ```math
-v_b=0.15+\exp\left(-\frac12\left(\frac{q_b-0.30}{0.30}\right)^2\right)
+v_b=0.10+\exp\left(-\frac12\left(\frac{q_b-0.30}{0.22}\right)^2\right)
 ```
 
 ```math
 p_b=\left[\max\left(\frac{v_b}{\max_j v_j},0.05\right)\right]^\gamma.
 ```
 
+Với $e_{b,t}$ là log năng lượng tương đối của band (năng lượng L2 trung bình của source-view trong band, trừ log năng lượng trung bình giữa các band), điểm band được tính:
+
 ```math
-w_{b,t}=\frac{\exp(c_{b,t}/\tau+\log\max(p_b,\eta))}
-{\sum_j\exp(c_{j,t}/\tau+\log\max(p_j,\eta))}.
+q_{b,t}=g_c c_{b,t}+g_e e_{b,t}+\mathbf{1}_{\mathrm{prior}}\log\max(p_b,\eta)
 ```
+
+```math
+w_{b,t}=\mathrm{softmax}\left(q_{b,t}/\tau\right)
+```
+
+Trong đó $g_c$ là `consensus_gain` và $g_e$ là `energy_strength`. Khi tắt frequency coordination, toàn bộ band score và fusion này được bỏ; khi tắt consensus hoặc prior, đúng hạng tương ứng được loại khỏi $q_{b,t}$. Vì $e_{b,t}$ được centered, energy term không làm thay đổi hướng nếu mọi band có cùng năng lượng.
+
+Sau softmax, mỗi weight được chặn dưới bởi `band_weight_floor` (mặc định 0.02) rồi chuẩn hóa lại. Điều này giữ một đóng góp nhỏ từ các band còn lại và tránh chuyển hẳn sang một band do dao động số học; giá trị này phải nằm trong $[0,1/B]$.
 
 $\tau$ là temperature, $\gamma$ là độ mạnh prior. Prior thiên về tần số thấp–trung bình; phép chặn dưới bằng $\eta$ trước khi lấy log tránh `log(0)` nếu lũy thừa bị underflow. Với $\gamma=0$, prior đồng đều. Code dùng `torch.softmax` để tính trọng số ổn định; trọng số được tính riêng cho từng ảnh.
 
@@ -363,14 +372,19 @@ Cập nhật ảnh bằng phép projection ở mục 4. Spectral memory và mome
 | Số view | `--num-views` | `SVFCA_NUM_VIEWS` | 4 |
 | Số band | `--spectral-bands` | `SVFCA_SPECTRAL_BANDS` | 6 |
 | Xác suất DI | `--diversity-prob` | `SVFCA_DIVERSITY_PROB` | 1.0 |
-| Temperature | `--band-temperature` | `SVFCA_BAND_TEMPERATURE` | 0.35 |
+| Temperature | `--band-temperature` | `SVFCA_BAND_TEMPERATURE` | 0.20 |
 | Prior strength | `--low-mid-strength` | `SVFCA_LOW_MID_STRENGTH` | 1.0 |
-| EMA decay | `--spectral-decay` | `SVFCA_SPECTRAL_DECAY` | 0.75 |
+| EMA decay | `--spectral-decay` | `SVFCA_SPECTRAL_DECAY` | 0.65 |
 | Momentum decay | `--decay` | `SVFCA_DECAY` | 1.0 |
 | CUDA autocast | `--amp` | `SVFCA_AMP` | 0, tắt |
+| Consensus gain | `--consensus-gain` | `SVFCA_CONSENSUS_GAIN` | 2.0 |
+| Energy strength | `--energy-strength` | `SVFCA_ENERGY_STRENGTH` | 0.75 |
+| Band weight floor | `--band-weight-floor` | `SVFCA_BAND_WEIGHT_FLOOR` | 0.02 |
 | Kiểu dữ liệu AMP | `--amp-dtype` | `SVFCA_AMP_DTYPE` | `fp16`; có thể chọn `bf16` |
 
-SV-FCA cần $TKR$ lần lấy gradient. Mỗi source-view cần một rFFT và $B$ inverse rFFT. Bộ nhớ tích lũy band tăng theo $B$ và batch size; streaming giảm việc giữ toàn bộ pool nhưng các surrogate vẫn được load đồng thời. Khi bật AMP, forward của SV-FCA dùng fp16/bf16 trên CUDA; FFT và thống kê giữ float32. Không tự động áp AMP cho bảy baseline.
+SV-FCA cần $TKR$ lần lấy gradient. Mỗi lần tính thêm năng lượng L2 của từng band để tránh việc các trọng số band bị gần đều chỉ vì consensus có biên độ nhỏ. Mỗi source-view cần một rFFT và $B$ inverse rFFT. Bộ nhớ tích lũy band tăng theo $B$ và batch size; streaming giảm việc giữ toàn bộ pool nhưng các surrogate vẫn được load đồng thời. Khi bật AMP, forward của SV-FCA dùng fp16/bf16 trên CUDA; FFT và thống kê giữ float32. Không tự động áp AMP cho bảy baseline.
+
+Cấu hình mặc định mới (`tau=0.20`, `consensus_gain=2.0`, `energy_strength=0.75`, `band_weight_floor=0.02`, `spectral_decay=0.65`) chọn band rõ hơn dựa trên ablation đã cho thấy frequency coordination gần như không hoạt động. Đây là cải tiến có kiểm soát, không phải bằng chứng rằng ASR luôn cao hơn trên mọi dataset; cần chạy lại cùng seed, checkpoint và tập ảnh để kết luận.
 
 Số view $R$ và số band $B$ là số nguyên, với $R\geq1$ và $B\geq2$ khi dùng phân rã tần số. Các tham số thực phải hữu hạn và thỏa $0\leq p\leq1$, $\tau>0$, $\gamma\geq0$, $0\leq\beta<1$, $\mu\geq0$; $p$ là xác suất DI. Các giá trị temperature/EMA ngoài miền hợp lệ bị báo lỗi, không được tự sửa ngầm. AMP không bảo đảm tương đương số học với float32; gradient không hữu hạn sẽ làm SV-FCA báo lỗi để người chạy đổi precision hoặc kiểm tra model.
 

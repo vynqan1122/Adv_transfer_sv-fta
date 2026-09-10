@@ -43,9 +43,12 @@
 : "${SVFCA_NUM_VIEWS:=4}"
 : "${SVFCA_SPECTRAL_BANDS:=6}"
 : "${SVFCA_DIVERSITY_PROB:=1.0}"
-: "${SVFCA_BAND_TEMPERATURE:=0.35}"
+: "${SVFCA_BAND_TEMPERATURE:=0.20}"      # lower temperature selects bands more sharply
 : "${SVFCA_LOW_MID_STRENGTH:=1.0}"
-: "${SVFCA_SPECTRAL_DECAY:=0.75}"
+: "${SVFCA_SPECTRAL_DECAY:=0.65}"
+: "${SVFCA_CONSENSUS_GAIN:=2.0}"
+: "${SVFCA_ENERGY_STRENGTH:=0.75}"
+: "${SVFCA_BAND_WEIGHT_FLOOR:=0.02}"    # keep a small contribution from every band
 : "${SVFCA_DECAY:=1.0}"
 : "${SVFCA_AMP:=${SVFTA_AMP:-0}}"        # FP32 default; AMP is opt-in
 : "${SVFCA_AMP_DTYPE:=${SVFTA_AMP_DTYPE:-fp16}}"

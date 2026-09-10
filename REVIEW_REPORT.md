@@ -67,3 +67,9 @@ Giảm từ 23 xuống 12 file `.sh`. Giữ các launcher có chức năng riên
 README và kiểm thử Bash được cập nhật theo launcher còn lại. Các `PATCH_NOTES_*.md` là lịch sử nên có thể nhắc đến tên script đã xóa; không dùng các lệnh lịch sử đó cho phiên bản hiện tại.
 
 Kiểm tra sau tinh gọn: `python3 -u tests/test_shell.py` đạt cho cả 12 script, gồm kiểm tra cấu hình, cú pháp, chạy ngoài thư mục gốc, truyền ngân sách/OOM policy, cache, defense và cleanup. Chỉ dùng Python chuẩn cùng CLI giả lập, không tải model/dataset hoặc sử dụng GPU. Không còn tham chiếu đến launcher đã xóa trong code, kiểm thử hoặc tài liệu hướng dẫn hiện hành; 123 công thức README vẫn qua MathJax.
+
+## Hiệu chỉnh SV-FCA theo ablation
+
+Bảng đầu vào cho thấy `without_sv_pool` làm ASR giảm mạnh, trong khi ba thành phần phổ gần như không làm thay đổi kết quả. Nguyên nhân là fusion cũ dùng trọng số softmax gần đều trên các band; tổng có trọng số sau đó được chuẩn hóa lại nên gần với spatial mean. Đã bổ sung ba hàm tách biệt: `_band_energy_features` (năng lượng L2 tương đối, centered-log), `_compute_band_weights` (consensus + energy + prior) và `_low_mid_prior` có width/floor kiểm soát. Thống kê stream tích lũy thêm năng lượng từng band và log vào `attack_steps.csv`.
+
+Cấu hình mặc định mới dùng `band_temperature=0.20`, `consensus_gain=2.0`, `energy_strength=0.75`, `band_weight_floor=0.02`, `spectral_decay=0.65`. Các tham số có CLI/Bash tương ứng và được đưa vào chữ ký cache. Ablation vẫn tắt đúng từng hạng; `without_frequency_coordination` bỏ toàn bộ fusion phổ. Những giá trị mới cần được đánh giá lại trên cùng protocol; báo cáo này không khẳng định ASR tăng trước khi chạy bảng.

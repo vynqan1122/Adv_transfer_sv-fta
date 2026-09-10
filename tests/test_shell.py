@@ -140,6 +140,9 @@ def test_shell_workflows():
                 assert math.isclose(float(args['--eps']), 16/255), call
                 assert math.isclose(float(args['--alpha']), 1.6/255), call
                 assert args['--steps'] == '10', call
+                assert args['--consensus-gain'] == '2.0', call
+                assert args['--energy-strength'] == '0.75', call
+                assert args['--band-weight-floor'] == '0.02', call
         print('PASS common budgets and adaptive batch policy reach every CLI')
 
         before = len(calls())
@@ -265,6 +268,7 @@ def test_config_preview():
                         {'SVFCA_BAND_TEMPERATURE': '0'}, {'SVFCA_DECAY': 'inf'},
                         {'SVFCA_DIVERSITY_PROB': '2'}, {'SVFCA_SPECTRAL_DECAY': '-0.1'},
                         {'SVFCA_SPECTRAL_DECAY': '1'}, {'SVFCA_SPECTRAL_BANDS': '1'},
+                        {'SVFCA_BAND_WEIGHT_FLOOR': '0.2'},
                         {'CONFIG_FILE': str(tmp/'missing.venv')}):
             result = preview(invalid)
             assert result.returncode != 0, invalid

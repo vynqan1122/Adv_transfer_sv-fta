@@ -79,8 +79,8 @@ def main():
                         help="Legacy compatibility option; ignored by SV-FCA.")
     parser.add_argument("--mid-cutoff", type=float, default=0.55,
                         help="Legacy compatibility option; ignored by SV-FCA.")
-    parser.add_argument("--band-temperature", type=float, default=0.35,
-                        help="SV-FCA softmax temperature for band consensus.")
+    parser.add_argument("--band-temperature", type=float, default=0.20,
+                        help="SV-FCA softmax temperature for band scores (lower is more selective).")
     parser.add_argument("--low-mid-strength", type=float, default=1.0,
                         help="SV-FCA strength of the smooth low/mid transfer prior.")
     parser.add_argument("--low-prior", type=float, default=1.0,
@@ -89,8 +89,14 @@ def main():
                         help="Legacy SV-FCA option; ignored by SV-FCA.")
     parser.add_argument("--high-prior", type=float, default=0.15,
                         help="Legacy SV-FCA option; ignored by SV-FCA.")
-    parser.add_argument("--spectral-decay", type=float, default=0.75,
+    parser.add_argument("--spectral-decay", type=float, default=0.65,
                         help="SV-FCA EMA decay for spectral band-weight memory.")
+    parser.add_argument("--consensus-gain", type=float, default=2.0,
+                        help="SV-FCA gain for source-view consensus in the band score.")
+    parser.add_argument("--energy-strength", type=float, default=0.75,
+                        help="SV-FCA gain for centered log band energy in the band score.")
+    parser.add_argument("--band-weight-floor", type=float, default=0.02,
+                        help="Minimum per-band SV-FCA weight after softmax (0 disables the floor).")
     parser.add_argument("--amp", action="store_true",
                         help="Use CUDA autocast for source-model forward passes. Saves activation VRAM; FFT/statistics stay float32.")
     parser.add_argument("--amp-dtype", choices=["fp16", "bf16"], default="fp16",
@@ -214,6 +220,9 @@ def main():
         mid_prior=args.mid_prior,
         high_prior=args.high_prior,
         spectral_decay=args.spectral_decay,
+        consensus_gain=args.consensus_gain,
+        energy_strength=args.energy_strength,
+        weight_floor=args.band_weight_floor,
         amp=args.amp,
         amp_dtype=args.amp_dtype,
         log_spectral_energy=args.log_spectral_energy,

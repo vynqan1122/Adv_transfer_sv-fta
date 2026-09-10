@@ -121,9 +121,12 @@ def main():
     # Ours-specific knobs
     ap.add_argument("--num-views", type=int, default=4)
     ap.add_argument("--spectral-bands", type=int, default=6)
-    ap.add_argument("--band-temperature", type=float, default=0.35)
+    ap.add_argument("--band-temperature", type=float, default=0.20)
     ap.add_argument("--low-mid-strength", type=float, default=1.0)
-    ap.add_argument("--spectral-decay", type=float, default=0.75)
+    ap.add_argument("--spectral-decay", type=float, default=0.65)
+    ap.add_argument("--consensus-gain", type=float, default=2.0)
+    ap.add_argument("--energy-strength", type=float, default=0.75)
+    ap.add_argument("--band-weight-floor", type=float, default=0.02)
     ap.add_argument("--diversity-prob", type=float, default=1.0)
     ap.add_argument("--decay", type=float, default=1.0)
     ap.add_argument("--rho", type=float, default=0.5)
@@ -169,6 +172,9 @@ def main():
             band_temperature=args.band_temperature,
             low_mid_strength=args.low_mid_strength,
             spectral_decay=args.spectral_decay,
+            consensus_gain=args.consensus_gain,
+            energy_strength=args.energy_strength,
+            weight_floor=args.band_weight_floor,
             diversity_prob=args.diversity_prob,
             decay=args.decay,
             rho=args.rho,
@@ -183,6 +189,11 @@ def main():
         ms, measured_images, measured_batches = measure_attack(
             attack, models, loader, device, args.max_images, args.num_batches, args.warmup_batches,
             executor=executor, measurement_metadata=metadata)
+        metadata.update({
+            "consensus_gain": args.consensus_gain,
+            "energy_strength": args.energy_strength,
+            "band_weight_floor": args.band_weight_floor,
+        })
         results.append({"method_key": method, "Method": METHOD_LABELS.get(method, method),
                         "Time/Image (ms)": ms, "Images": measured_images, "Measured Batches": measured_batches,
                         "batch_execution": metadata})
@@ -211,6 +222,9 @@ def main():
             "Seed": args.seed,
             "Auto Batch": metadata["auto_batch"],
             "RNG Restored On Retry": metadata["rng_restored_on_retry"],
+            "Consensus Gain": metadata["consensus_gain"],
+            "Energy Strength": metadata["energy_strength"],
+            "Band Weight Floor": metadata["band_weight_floor"],
             "Timing Scope": metadata["timing_scope"],
         })
 
